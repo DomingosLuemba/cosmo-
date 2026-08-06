@@ -1,0 +1,14 @@
+# Node / backend
+node_modules/
+dist/
+.env
+*.log
+
+# macOS
+.DS_Store
+
+# Xcode (quando o projeto .xcodeproj for criado neste repo)
+*.xcodeproj/xcuserdata/
+*.xcworkspace/xcuserdata/
+DerivedData/
+*.xcuserstate
