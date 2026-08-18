@@ -42,8 +42,9 @@ sequenceDiagram
   `approval_required`, seguindo `docs/POLICY.md`.
 - `approval/approvalStore.ts` — fila em memória de aprovações pendentes por
   dispositivo.
-- `approval/push.ts` — stub de envio de push (APNs); precisa de certificado/
-  chave da Apple para funcionar de verdade.
+- `approval/push.ts` — envio de push via APNs (HTTP/2 + provider token JWT
+  ES256); precisa da chave `.p8` da Apple nas variáveis `APNS_*`. Sem elas,
+  cai num modo stub que só loga.
 - `store/deviceQueue.ts` — fila de ações prontas para o app executar.
 - `store/sessionStore.ts` — histórico de conversa por usuário/dispositivo.
 - `routes/` — API HTTP consumida pelo app.
@@ -53,8 +54,9 @@ sequenceDiagram
 - `Intents/` — `AppIntent`s que a Siri/Atalhos conseguem invocar e que o
   próprio Cosmo executa ao receber uma ação do backend.
 - `Networking/BackendClient.swift` — chama a API do backend.
-- `Networking/PushHandler.swift` — recebe push silenciosa, acorda o app em
-  background, busca a próxima ação (`GET /device/:id/next-action`).
+- `Networking/PushHandler.swift` — recebe a push de aprovação (que vem com
+  `content-available`), acorda o app em background, busca a próxima ação
+  (`GET /device/:id/next-action`).
 - `Approval/ApprovalView.swift` — tela de confirmação para ações sensíveis.
 - `Intents/ActionExecutor.swift` — despacha a ação recebida do backend para
   o `AppIntent`/API correspondente.

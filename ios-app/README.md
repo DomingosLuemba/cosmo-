@@ -18,7 +18,11 @@ desenvolver:
 
 ## 2. Capabilities necessárias (target → Signing & Capabilities)
 
-- **Push Notifications** — para a push silenciosa que acorda o app.
+- **Push Notifications** — para a push que avisa de aprovações pendentes e
+  acorda o app. Do outro lado, o backend precisa das variáveis `APNS_*`
+  (ver `backend/.env.example`); o `APNS_BUNDLE_ID` tem que ser o mesmo
+  bundle identifier do target, e builds de debug do Xcode usam
+  `APNS_ENV=sandbox`.
 - **Background Modes** → marque **Remote notifications**.
 - **HomeKit** — se for usar `control_home_device`.
 
@@ -51,7 +55,6 @@ requer Xcode/macOS para compilar):
 Faltando (próximos passos, ver `docs/ARCHITECTURE.md`):
 
 - Login/identidade real do usuário (hoje `CurrentUser` é um placeholder fixo).
-- Envio de push real do lado do backend (APNs) — hoje é um stub que só loga.
 - `compose_message` de fato abrindo `MFMessageComposeViewController` a partir
   da UI do app.
 - `set_volume`, `control_home_device`, `web_search` no `ActionExecutor`.

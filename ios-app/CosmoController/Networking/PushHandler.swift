@@ -1,8 +1,9 @@
 import UIKit
 
-/// Recebe a push silenciosa que o backend envia (`approval/push.ts`) quando
-/// há uma nova ação/aprovação, acorda o app em background, e dispara o
-/// polling de `ActionExecutor`.
+/// Recebe a push que o backend envia (`approval/push.ts`) quando há uma nova
+/// ação/aprovação. O payload vem com `content-available: 1`, então além de
+/// mostrar o alerta o iOS acorda o app em background e dispara o polling de
+/// `ActionExecutor`.
 ///
 /// Requer as capabilities "Push Notifications" e "Background Modes →
 /// Remote notifications" habilitadas no target do Xcode.
