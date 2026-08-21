@@ -26,6 +26,9 @@ struct ContentView: View {
 
             ApprovalView(store: approvalStore, deviceId: CurrentUser.deviceId)
                 .tabItem { Label("Aprovações", systemImage: "checkmark.shield") }
+
+            RemoteKeyboardView()
+                .tabItem { Label("Teclado", systemImage: "keyboard") }
         }
     }
 

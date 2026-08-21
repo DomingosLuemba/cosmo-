@@ -47,6 +47,8 @@ requer Xcode/macOS para compilar):
 - App Intents básicos para Siri/Atalhos (`Intents/*Intent.swift`).
 - Tela de aprovação de ações sensíveis (`Approval/`).
 - Handler de push silenciosa (`Networking/PushHandler.swift`).
+- Teclado remoto do Mac (`RemoteKeyboard/`): pareamento por código, captura
+  de teclas com `UIKeyInput` e envio em lote — ver `docs/MAC_KEYBOARD.md`.
 
 Faltando (próximos passos, ver `docs/ARCHITECTURE.md`):
 

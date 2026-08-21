@@ -48,6 +48,8 @@ backend/      Servidor Node/TypeScript: orquestra o Claude, define as tools
 ios-app/      App iOS (Swift/SwiftUI + App Intents): recebe ações do backend
               e as executa localmente; mostra tela de aprovação para ações
               sensíveis.
+mac-agent/    Executável Swift para macOS: recebe as teclas digitadas no
+              iPhone e as injeta no Mac via CGEvent.
 docs/         Arquitetura e política de sensibilidade (o que é autônomo vs.
               o que exige aprovação).
 ```
@@ -75,6 +77,22 @@ cp .env.example .env   # preencha ANTHROPIC_API_KEY
 npm install
 npm run dev
 ```
+
+## Teclado: digitar no Mac pelo iPhone
+
+Além de agir no iPhone, o Cosmo transforma o telefone num **teclado do Mac**.
+É o sentido inverso do resto do projeto — e o único que a Apple permite: o
+macOS deixa um processo autorizado sintetizar teclas com `CGEvent`, o iOS
+não tem nada equivalente.
+
+```bash
+cd mac-agent
+swift run cosmo-mac-agent --backend http://<ip-do-backend>:3000
+```
+
+O agente mostra um código de 6 dígitos; digite-o no app, aba **Teclado**.
+Passo a passo completo, limitações e avisos de segurança em
+`docs/MAC_KEYBOARD.md`.
 
 ## Como abrir o app iOS
 

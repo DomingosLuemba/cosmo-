@@ -46,6 +46,8 @@ sequenceDiagram
   chave da Apple para funcionar de verdade.
 - `store/deviceQueue.ts` — fila de ações prontas para o app executar.
 - `store/sessionStore.ts` — histórico de conversa por usuário/dispositivo.
+- `mac/macRegistry.ts` — agentes macOS conectados e pareamentos por código.
+- `mac/relay.ts` — WebSocket que empurra as teclas do telefone para o Mac.
 - `routes/` — API HTTP consumida pelo app.
 
 ### App iOS (`ios-app/`)
@@ -58,6 +60,49 @@ sequenceDiagram
 - `Approval/ApprovalView.swift` — tela de confirmação para ações sensíveis.
 - `Intents/ActionExecutor.swift` — despacha a ação recebida do backend para
   o `AppIntent`/API correspondente.
+- `RemoteKeyboard/` — aba "Teclado": captura as teclas com `UIKeyInput` e as
+  manda em lote para o Mac (ver `docs/MAC_KEYBOARD.md`).
+
+### Agente macOS (`mac-agent/`)
+
+Executável Swift (SPM) que fica conectado ao backend por WebSocket e injeta
+as teclas recebidas com `CGEvent`. É a única parte do projeto que roda no
+Mac, e o único caminho em que o Cosmo controla *outro* aparelho a partir do
+iPhone — ver a seção abaixo.
+
+## Teclado do Mac (iPhone → Mac)
+
+Fluxo separado do de ações: aqui o iPhone é o *controle*, não o alvo.
+
+```mermaid
+sequenceDiagram
+    participant U as Usuário
+    participant App as App iOS (aba Teclado)
+    participant BE as Backend (relay)
+    participant Ag as Agente no Mac
+    participant Mac as macOS
+
+    Ag->>BE: WebSocket /mac/agent (agentId)
+    BE-->>Ag: código de pareamento (6 dígitos)
+    Ag->>U: mostra o código no terminal
+    U->>App: digita o código
+    App->>BE: POST /mac/pair
+    BE-->>App: token de sessão
+    loop a cada tecla
+        U->>App: digita
+        App->>App: agrupa eventos (30 ms)
+        App->>BE: POST /mac/input (+ token)
+        BE->>Ag: push do lote pelo WebSocket
+        Ag->>Mac: CGEvent (keycode ou string Unicode)
+    end
+```
+
+Por que WebSocket só de um lado: o app iOS já fala HTTP com o backend e
+digitação sai em lote, então o custo por requisição é aceitável; já a perna
+backend→Mac precisa ser *push*, senão o agente teria que ficar em polling e
+a latência apareceria na hora de digitar.
+
+Detalhes de tradução de tecla, limitações e segurança: `docs/MAC_KEYBOARD.md`.
 
 ## Roadmap para ampliar o que é "autônomo"
 

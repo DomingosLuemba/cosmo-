@@ -4,6 +4,11 @@ dist/
 .env
 *.log
 
+# Swift / mac-agent
+.build/
+.swiftpm/
+Package.resolved
+
 # macOS
 .DS_Store
 
