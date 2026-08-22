@@ -32,9 +32,17 @@ type Store struct {
 	tree    *smt
 	version int64
 
-	// pending holds writes staged since the last Commit. A nil value means
-	// the key is being deleted.
-	pending map[string][]byte
+	// pending holds writes staged since the last Commit.
+	pending map[string]pendingWrite
+}
+
+// pendingWrite is one staged change. Deletion is carried by an explicit flag
+// rather than by a nil value, because a nil and an empty byte slice are the
+// same thing in Go: representing "delete" as nil would make storing an empty
+// value silently delete the key instead.
+type pendingWrite struct {
+	value   []byte
+	deleted bool
 }
 
 // Open loads a store from a database, restoring the last committed version.
@@ -44,7 +52,7 @@ func Open(db dbm.DB) (*Store, error) {
 		db:      db,
 		nodes:   nodes,
 		tree:    &smt{nodes: nodes},
-		pending: map[string][]byte{},
+		pending: map[string]pendingWrite{},
 	}
 
 	verBytes, err := db.Get(metaLastVer)
@@ -81,11 +89,11 @@ func dataKey(key []byte) []byte {
 
 // Get returns the value for a key, honouring pending writes.
 func (s *Store) Get(key []byte) ([]byte, error) {
-	if v, ok := s.pending[string(key)]; ok {
-		if v == nil {
+	if w, ok := s.pending[string(key)]; ok {
+		if w.deleted {
 			return nil, ErrNotFound
 		}
-		return append([]byte(nil), v...), nil
+		return append([]byte{}, w.value...), nil
 	}
 	v, err := s.db.Get(dataKey(key))
 	if err != nil {
@@ -114,7 +122,7 @@ func (s *Store) Set(key, value []byte) error {
 	if len(key) == 0 {
 		return errors.New("empty key")
 	}
-	s.pending[string(key)] = append([]byte(nil), value...)
+	s.pending[string(key)] = pendingWrite{value: append([]byte{}, value...)}
 	return nil
 }
 
@@ -123,7 +131,7 @@ func (s *Store) Delete(key []byte) error {
 	if len(key) == 0 {
 		return errors.New("empty key")
 	}
-	s.pending[string(key)] = nil
+	s.pending[string(key)] = pendingWrite{deleted: true}
 	return nil
 }
 
@@ -150,14 +158,14 @@ func (s *Store) Iterate(prefix []byte, fn func(key, value []byte) bool) error {
 	if err := it.Error(); err != nil {
 		return err
 	}
-	for k, v := range s.pending {
+	for k, w := range s.pending {
 		if !strings.HasPrefix(k, string(prefix)) {
 			continue
 		}
-		if v == nil {
+		if w.deleted {
 			delete(merged, k)
 		} else {
-			merged[k] = v
+			merged[k] = w.value
 		}
 	}
 
@@ -190,7 +198,7 @@ func prefixEnd(prefix []byte) []byte {
 
 // Discard drops all pending writes. Used when a transaction fails and its
 // partial effects must not survive.
-func (s *Store) Discard() { s.pending = map[string][]byte{} }
+func (s *Store) Discard() { s.pending = map[string]pendingWrite{} }
 
 // PendingCount reports how many keys are staged.
 func (s *Store) PendingCount() int { return len(s.pending) }
@@ -215,9 +223,9 @@ func (s *Store) Commit(version int64) ([]byte, error) {
 	defer batch.Close()
 
 	for _, k := range keys {
-		v := s.pending[k]
+		w := s.pending[k]
 		kh := sha256.Sum256([]byte(k))
-		if v == nil {
+		if w.deleted {
 			if err := s.tree.Delete(kh[:]); err != nil {
 				return nil, err
 			}
@@ -226,6 +234,7 @@ func (s *Store) Commit(version int64) ([]byte, error) {
 			}
 			continue
 		}
+		v := w.value
 		vh := sha256.Sum256(v)
 		if err := s.tree.Update(kh[:], vh[:]); err != nil {
 			return nil, err
@@ -252,7 +261,7 @@ func (s *Store) Commit(version int64) ([]byte, error) {
 		return nil, fmt.Errorf("commit: %w", err)
 	}
 
-	s.pending = map[string][]byte{}
+	s.pending = map[string]pendingWrite{}
 	s.version = version
 	return root, nil
 }
@@ -293,27 +302,28 @@ func ValueHash(value []byte) []byte {
 // the messages run, and on failure the snapshot is restored. That is what
 // makes a failing transaction still cost its sender, which is what stops free
 // spam.
-func (s *Store) SnapshotPending() map[string][]byte {
-	out := make(map[string][]byte, len(s.pending))
-	for k, v := range s.pending {
-		if v == nil {
-			out[k] = nil
-			continue
+func (s *Store) SnapshotPending() Snapshot {
+	out := make(map[string]pendingWrite, len(s.pending))
+	for k, w := range s.pending {
+		out[k] = pendingWrite{
+			value:   append([]byte{}, w.value...),
+			deleted: w.deleted,
 		}
-		out[k] = append([]byte(nil), v...)
 	}
-	return out
+	return Snapshot{writes: out}
 }
 
+// Snapshot is an opaque copy of the staged write set.
+type Snapshot struct{ writes map[string]pendingWrite }
+
 // RestorePending replaces the staged write set with a previous snapshot.
-func (s *Store) RestorePending(snapshot map[string][]byte) {
-	next := make(map[string][]byte, len(snapshot))
-	for k, v := range snapshot {
-		if v == nil {
-			next[k] = nil
-			continue
+func (s *Store) RestorePending(snapshot Snapshot) {
+	next := make(map[string]pendingWrite, len(snapshot.writes))
+	for k, w := range snapshot.writes {
+		next[k] = pendingWrite{
+			value:   append([]byte{}, w.value...),
+			deleted: w.deleted,
 		}
-		next[k] = append([]byte(nil), v...)
 	}
 	s.pending = next
 }

@@ -208,3 +208,41 @@ func TestReopenPreservesRoot(t *testing.T) {
 		t.Fatalf("value lost across reopen: %q %v", v, err)
 	}
 }
+
+// Storing an empty value must store an empty value, not delete the key. This
+// was found by FuzzStoreProof: representing a deletion as a nil value made the
+// two indistinguishable, so writing an empty value silently removed the row.
+func TestEmptyValueIsStoredNotDeleted(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.Set([]byte("empty"), []byte{}); err != nil {
+		t.Fatal(err)
+	}
+	v, err := s.Get([]byte("empty"))
+	if err != nil {
+		t.Fatalf("an empty value was treated as absent: %v", err)
+	}
+	if len(v) != 0 {
+		t.Fatalf("got %q, want an empty value", v)
+	}
+	root, err := s.Commit(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Get([]byte("empty")); err != nil {
+		t.Fatalf("the empty value did not survive commit: %v", err)
+	}
+	proof, value, err := s.Prove([]byte("empty"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !VerifyProof(root, KeyHash([]byte("empty")), ValueHash(value), proof) {
+		t.Fatal("membership proof failed for a key holding an empty value")
+	}
+
+	if err := s.Delete([]byte("empty")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Get([]byte("empty")); err == nil {
+		t.Fatal("the key survived an explicit delete")
+	}
+}
