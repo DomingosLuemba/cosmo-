@@ -1,0 +1,39 @@
+# YOZEXA node image.
+#
+# Multi-stage, non-root, no secrets. Key material is mounted at runtime and
+# never baked into a layer — a private key in an image is a private key in
+# every registry that image is pushed to.
+
+FROM golang:1.24-bookworm AS build
+
+WORKDIR /src
+# Dependencies first, so a source change does not re-download the module graph.
+COPY chain/go.mod chain/go.sum ./chain/
+RUN cd chain && go mod download
+
+COPY chain/ ./chain/
+# -trimpath and an empty build id are the first two steps towards a
+# reproducible build: the same source produces the same bytes on any machine,
+# which is what lets a third party check a signed release.
+RUN cd chain && CGO_ENABLED=0 go build \
+      -trimpath -ldflags "-s -w -buildid=" \
+      -o /out/yozexad ./cmd/yozexad && \
+    CGO_ENABLED=0 go build \
+      -trimpath -ldflags "-s -w -buildid=" \
+      -o /out/yozexa ./cmd/yozexa
+
+FROM gcr.io/distroless/static-debian12:nonroot
+
+COPY --from=build /out/yozexad /usr/local/bin/yozexad
+COPY --from=build /out/yozexa  /usr/local/bin/yozexa
+
+# The node runs unprivileged and owns nothing outside its home directory.
+USER nonroot:nonroot
+ENV YOZEXA_HOME=/home/nonroot/.yozexa
+VOLUME ["/home/nonroot/.yozexa"]
+
+# 26656 p2p · 26657 CometBFT RPC · 1717 YOZEXA API
+EXPOSE 26656 26657 1717
+
+ENTRYPOINT ["/usr/local/bin/yozexad"]
+CMD ["start", "--api", "0.0.0.0:1717"]
