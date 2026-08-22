@@ -344,15 +344,27 @@ func (a *App) FinalizeBlock(_ context.Context, req *abci.RequestFinalizeBlock) (
 		}
 	}
 
+	// The app hash MUST be returned here, not from Commit. CometBFT puts it
+	// into the next block's header, and on restart it replays the last block
+	// and checks that the application reproduces the same hash. Returning nil
+	// makes a node fail its own replay check and refuse to start.
+	appHash, err := a.kv.WorkingRoot()
+	if err != nil {
+		return nil, fmt.Errorf("compute app hash for height %d: %w", req.Height, err)
+	}
+
 	return &abci.ResponseFinalizeBlock{
 		TxResults:        results,
 		ValidatorUpdates: updates,
 		Events:           events,
-		AppHash:          nil, // filled by Commit
+		AppHash:          appHash,
 	}, nil
 }
 
-// Commit persists the block's state and returns the new app hash.
+// Commit makes the block that FinalizeBlock executed durable.
+//
+// The hash was already returned from FinalizeBlock; this writes the state that
+// produced it, atomically, in a single database batch.
 func (a *App) Commit(_ context.Context, _ *abci.RequestCommit) (*abci.ResponseCommit, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()

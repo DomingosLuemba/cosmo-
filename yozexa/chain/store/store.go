@@ -34,6 +34,15 @@ type Store struct {
 
 	// pending holds writes staged since the last Commit.
 	pending map[string]pendingWrite
+
+	// treeApplied records that pending writes have already been folded into
+	// the in-memory tree by WorkingRoot, so Commit does not repeat the work.
+	treeApplied bool
+	// rootBeforePending is the tree root as it stood before those writes were
+	// folded in. Keeping it means a later change to the pending set can rewind
+	// the tree instead of stacking a second set of updates on top of the first,
+	// which would produce a root describing state that was never staged.
+	rootBeforePending []byte
 }
 
 // pendingWrite is one staged change. Deletion is carried by an explicit flag
@@ -122,6 +131,7 @@ func (s *Store) Set(key, value []byte) error {
 	if len(key) == 0 {
 		return errors.New("empty key")
 	}
+	s.rewindTree()
 	s.pending[string(key)] = pendingWrite{value: append([]byte{}, value...)}
 	return nil
 }
@@ -131,6 +141,7 @@ func (s *Store) Delete(key []byte) error {
 	if len(key) == 0 {
 		return errors.New("empty key")
 	}
+	s.rewindTree()
 	s.pending[string(key)] = pendingWrite{deleted: true}
 	return nil
 }
@@ -198,7 +209,68 @@ func prefixEnd(prefix []byte) []byte {
 
 // Discard drops all pending writes. Used when a transaction fails and its
 // partial effects must not survive.
-func (s *Store) Discard() { s.pending = map[string]pendingWrite{} }
+func (s *Store) Discard() {
+	s.pending = map[string]pendingWrite{}
+	s.rewindTree()
+}
+
+// rewindTree undoes a previous fold of pending writes, so the tree once again
+// reflects only committed state.
+func (s *Store) rewindTree() {
+	if s.treeApplied && s.rootBeforePending != nil {
+		s.tree.root = s.rootBeforePending
+	}
+	s.treeApplied = false
+	s.rootBeforePending = nil
+}
+
+// WorkingRoot folds the staged writes into the in-memory tree and returns the
+// root they produce, WITHOUT making anything durable.
+//
+// This is what the state machine returns from FinalizeBlock. CometBFT puts
+// that hash into the next block's header, so it has to be available before the
+// block is persisted — and it has to describe exactly the state that Commit
+// will then write, or a node will fail its own replay check after a restart.
+func (s *Store) WorkingRoot() ([]byte, error) {
+	if err := s.applyPendingToTree(); err != nil {
+		return nil, err
+	}
+	return s.tree.Root(), nil
+}
+
+// applyPendingToTree folds staged writes into the tree in deterministic key
+// order. It is idempotent: calling it twice for the same pending set produces
+// the same tree, because an SMT update is a function of the final key/value
+// set rather than of the sequence of operations.
+func (s *Store) applyPendingToTree() error {
+	if s.treeApplied {
+		return nil
+	}
+	s.rootBeforePending = s.tree.Root()
+
+	keys := make([]string, 0, len(s.pending))
+	for k := range s.pending {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	for _, k := range keys {
+		w := s.pending[k]
+		kh := sha256.Sum256([]byte(k))
+		if w.deleted {
+			if err := s.tree.Delete(kh[:]); err != nil {
+				return err
+			}
+			continue
+		}
+		vh := sha256.Sum256(w.value)
+		if err := s.tree.Update(kh[:], vh[:]); err != nil {
+			return err
+		}
+	}
+	s.treeApplied = true
+	return nil
+}
 
 // PendingCount reports how many keys are staged.
 func (s *Store) PendingCount() int { return len(s.pending) }
@@ -210,9 +282,11 @@ func (s *Store) Commit(version int64) ([]byte, error) {
 		return nil, fmt.Errorf("commit version %d is not greater than current %d", version, s.version)
 	}
 
-	// Apply writes to the tree in deterministic key order. The tree result is
-	// order-independent by construction, but a fixed order keeps node writes
-	// (and therefore disk layout) reproducible across nodes.
+	// Fold the writes into the tree, if WorkingRoot has not already done so.
+	if err := s.applyPendingToTree(); err != nil {
+		return nil, err
+	}
+
 	keys := make([]string, 0, len(s.pending))
 	for k := range s.pending {
 		keys = append(keys, k)
@@ -224,22 +298,13 @@ func (s *Store) Commit(version int64) ([]byte, error) {
 
 	for _, k := range keys {
 		w := s.pending[k]
-		kh := sha256.Sum256([]byte(k))
 		if w.deleted {
-			if err := s.tree.Delete(kh[:]); err != nil {
-				return nil, err
-			}
 			if err := batch.Delete(dataKey([]byte(k))); err != nil {
 				return nil, err
 			}
 			continue
 		}
-		v := w.value
-		vh := sha256.Sum256(v)
-		if err := s.tree.Update(kh[:], vh[:]); err != nil {
-			return nil, err
-		}
-		if err := batch.Set(dataKey([]byte(k)), v); err != nil {
+		if err := batch.Set(dataKey([]byte(k)), w.value); err != nil {
 			return nil, err
 		}
 	}
@@ -262,6 +327,8 @@ func (s *Store) Commit(version int64) ([]byte, error) {
 	}
 
 	s.pending = map[string]pendingWrite{}
+	s.treeApplied = false
+	s.rootBeforePending = nil
 	s.version = version
 	return root, nil
 }
@@ -326,4 +393,5 @@ func (s *Store) RestorePending(snapshot Snapshot) {
 		}
 	}
 	s.pending = next
+	s.rewindTree()
 }

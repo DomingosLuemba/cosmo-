@@ -189,6 +189,30 @@ export class YozexaClient {
     return this.#request("/v1/validators");
   }
 
+  validator(operator: string): Promise<Record<string, unknown>> {
+    return this.#request(`/v1/validator/${encodeURIComponent(operator)}`);
+  }
+
+  proposals(): Promise<{ proposals: Array<Record<string, unknown>> }> {
+    return this.#request("/v1/proposals");
+  }
+
+  proposal(id: number | string): Promise<Record<string, unknown>> {
+    return this.#request(`/v1/proposal/${encodeURIComponent(String(id))}`);
+  }
+
+  emission(): Promise<Record<string, string | number>> {
+    return this.#request("/v1/emission");
+  }
+
+  params(): Promise<Record<string, unknown>> {
+    return this.#request("/v1/params");
+  }
+
+  unbonding(address: string): Promise<{ unbonding: Array<Record<string, unknown>> }> {
+    return this.#request(`/v1/unbonding/${encodeURIComponent(address)}`);
+  }
+
   delegations(address: string): Promise<{ delegations: Array<Record<string, unknown>> }> {
     return this.#request(`/v1/delegations/${encodeURIComponent(address)}`);
   }

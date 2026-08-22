@@ -1,9 +1,13 @@
 package app_test
 
 import (
+	"bytes"
+	"context"
 	"math/big"
 	"testing"
 	"time"
+
+	abci "github.com/cometbft/cometbft/abci/types"
 
 	"github.com/yozexa/yozexa/chain/app"
 	"github.com/yozexa/yozexa/chain/state"
@@ -349,4 +353,79 @@ func TestMultiSendIsAtomic(t *testing.T) {
 		}
 	}
 	h.checkInvariants()
+}
+
+// A node must survive a restart. CometBFT replays the last block on startup
+// and compares the application's hash against the one recorded in the block
+// header — so FinalizeBlock has to return the hash that Commit then makes
+// durable. Getting this wrong makes a node refuse to start after any restart,
+// which is exactly what happened before this test existed.
+func TestAppHashFromFinalizeBlockMatchesTheCommittedState(t *testing.T) {
+	val := newAccount(t)
+	alice := newAccount(t)
+	bob := newAccount(t)
+	h := newHarness(t, val, map[*account]int64{alice: 100})
+
+	// Execute a block and capture the hash FinalizeBlock reported.
+	h.height++
+	h.now = h.now.Add(3 * time.Second)
+	res, err := h.app.FinalizeBlock(context.Background(), &abci.RequestFinalizeBlock{
+		Height: h.height,
+		Time:   h.now,
+		Txs: [][]byte{h.sign(alice, tx.MsgSend{
+			From: alice.addr, To: bob.addr, Amount: types.MustAmount(types.YZXA(5)),
+		})},
+		DecidedLastCommit: abci.CommitInfo{
+			Votes: []abci.VoteInfo{{
+				Validator:   abci.Validator{Address: h.valConsAddr.Bytes(), Power: 500},
+				BlockIdFlag: 2,
+			}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("finalize: %v", err)
+	}
+	if len(res.AppHash) == 0 {
+		t.Fatal("FinalizeBlock returned an empty app hash; a node cannot replay its own last block")
+	}
+	reported := append([]byte(nil), res.AppHash...)
+
+	if _, err := h.app.Commit(context.Background(), &abci.RequestCommit{}); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	// What Info reports after the commit must be the same hash.
+	info, err := h.app.Info(context.Background(), &abci.RequestInfo{})
+	if err != nil {
+		t.Fatalf("info: %v", err)
+	}
+	if !bytes.Equal(info.LastBlockAppHash, reported) {
+		t.Fatalf("app hash changed between FinalizeBlock and Commit:\n  finalize: %X\n  info:     %X",
+			reported, info.LastBlockAppHash)
+	}
+	if info.LastBlockHeight != h.height {
+		t.Fatalf("Info reports height %d, expected %d", info.LastBlockHeight, h.height)
+	}
+	h.checkInvariants()
+}
+
+// The app hash must describe the state a block actually produced: two blocks
+// that change state differently must not report the same hash.
+func TestAppHashChangesWithState(t *testing.T) {
+	val := newAccount(t)
+	alice := newAccount(t)
+	bob := newAccount(t)
+	h := newHarness(t, val, map[*account]int64{alice: 100})
+
+	h.commitBlock()
+	first := h.app.State().Store().Root()
+
+	h.requireOK(h.commitBlock(h.sign(alice, tx.MsgSend{
+		From: alice.addr, To: bob.addr, Amount: types.MustAmount(types.YZXA(1)),
+	})))
+	second := h.app.State().Store().Root()
+
+	if bytes.Equal(first, second) {
+		t.Fatal("the app hash did not change after a payment moved funds")
+	}
 }
