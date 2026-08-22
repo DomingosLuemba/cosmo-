@@ -19,3 +19,4 @@ node_key.json
 .env
 .env.*
 !.env.example
+.faucet-test/
