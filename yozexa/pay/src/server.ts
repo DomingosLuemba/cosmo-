@@ -19,6 +19,7 @@ import { PaymentError, PaymentsService, publicPayment } from "./payments.js";
 import { HttpPriceSource, NoPriceSource, QuoteUnavailable, type PriceSource } from "./quotes.js";
 import { deliverDue, enqueue, WEBHOOK_EVENTS, type WebhookEvent } from "./webhooks.js";
 import { newWebhookId } from "./ids.js";
+import { decryptSecret, encryptSecret, hasSigningKey } from "./secrets.js";
 import { migrationsDir } from "./paths.js";
 
 interface RequestContext {
@@ -417,12 +418,21 @@ export class PayServer {
         throw new PaymentError(`unknown event ${JSON.stringify(event)}`);
       }
     }
+    if (!hasSigningKey()) {
+      throw new PaymentError(
+        "this service has no WEBHOOK_SIGNING_KEY configured, so it cannot sign deliveries; " +
+          "webhooks are unavailable until an operator sets one",
+        503,
+      );
+    }
     const secret = `whsec_${Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64url")}`;
     const id = newWebhookId();
+    // Hashed for identification, encrypted so the service can actually sign
+    // with it. See src/secrets.ts for why the two differ.
     await this.pool.query(
-      `INSERT INTO webhook_endpoints (id, merchant_id, url, secret_hash, events)
-       VALUES ($1, $2, $3, $4, $5)`,
-      [id, merchantId, url, sha256Hex(secret), events],
+      `INSERT INTO webhook_endpoints (id, merchant_id, url, secret_hash, secret_encrypted, events)
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [id, merchantId, url, sha256Hex(secret), encryptSecret(secret, id), events],
     );
     return {
       id,
@@ -456,6 +466,27 @@ export class PayServer {
     const a = Buffer.from(expected, "utf8");
     const b = Buffer.from(signature, "utf8");
     return a.length === b.length && timingSafeEqual(a, b);
+  }
+}
+
+/**
+ * Recover an endpoint's signing secret so a delivery can be signed with it.
+ *
+ * Returns null when the endpoint predates encrypted storage or the service key
+ * is missing, which makes `deliverDue` mark the delivery failed with a clear
+ * reason rather than sending an unverifiable payload.
+ */
+export async function webhookSecret(pool: Pool, endpointId: string): Promise<string | null> {
+  const { rows } = await pool.query<{ secret_encrypted: string | null }>(
+    "SELECT secret_encrypted FROM webhook_endpoints WHERE id = $1",
+    [endpointId],
+  );
+  const stored = rows[0]?.secret_encrypted;
+  if (!stored) return null;
+  try {
+    return decryptSecret(stored, endpointId);
+  } catch {
+    return null;
   }
 }
 
@@ -604,6 +635,16 @@ export async function main(): Promise<void> {
     );
   }
 
+  if (!hasSigningKey()) {
+    const message =
+      "WEBHOOK_SIGNING_KEY is not set: webhook endpoints cannot be created and deliveries cannot " +
+      "be signed. Generate one with `openssl rand -base64 32` and put it in your secret manager.";
+    if (config.environment === "live") {
+      throw new Error(`refusing to start in live mode — ${message}`);
+    }
+    console.log(`[pay] ${message}`);
+  }
+
   const payments = new PaymentsService(pool, priceSource, config.quoteTtlSeconds);
 
   // Follow the chain and settle payments as transfers arrive.
@@ -622,9 +663,9 @@ export async function main(): Promise<void> {
   // Deliver webhooks and expire stale payments on a timer.
   const worker = setInterval(() => {
     void payments.expireStale().catch((err) => console.error("[pay] expiry sweep:", err));
-    void deliverDue(pool, {
-      secretFor: async () => process.env.WEBHOOK_SECRET ?? null,
-    }).catch((err) => console.error("[pay] webhook delivery:", err));
+    void deliverDue(pool, { secretFor: (id) => webhookSecret(pool, id) }).catch((err) =>
+      console.error("[pay] webhook delivery:", err),
+    );
   }, 5_000);
   worker.unref();
 

@@ -22,6 +22,14 @@ import { NoPriceSource, HttpPriceSource, quoteFiat, QuoteUnavailable } from "../
 import { signPayload, verifySignature, enqueue, deliverDue } from "../src/webhooks.js";
 import { newMerchantId, newApiKeyId } from "../src/ids.js";
 import { migrationsDir } from "../src/paths.js";
+import {
+  decryptSecret,
+  encryptSecret,
+  generateServiceKey,
+  hasSigningKey,
+  MissingSigningKey,
+} from "../src/secrets.js";
+import { webhookSecret } from "../src/server.js";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 const shouldRun = Boolean(DATABASE_URL);
@@ -452,6 +460,66 @@ describe("webhook delivery", { skip: !shouldRun }, () => {
     assert.equal(rows[0]!.status, "pending");
     assert.equal(Number(rows[0]!.attempts), 1);
     assert.ok(rows[0]!.next_attempt_at.getTime() > Date.now(), "no backoff was applied");
+
+    await pool.query("DELETE FROM webhook_endpoints WHERE id = $1", [endpointId]);
+  });
+});
+
+describe("webhook secrets at rest", () => {
+  it("round-trips a secret and binds it to its endpoint", () => {
+    process.env.WEBHOOK_SIGNING_KEY = generateServiceKey();
+    const secret = "whsec_example";
+    const stored = encryptSecret(secret, "whe_1");
+
+    assert.notEqual(stored, secret, "the secret was stored in the clear");
+    assert.equal(decryptSecret(stored, "whe_1"), secret);
+
+    // The endpoint id is authenticated, so a ciphertext cannot be moved to
+    // another row to make one endpoint sign with another's secret.
+    assert.throws(() => decryptSecret(stored, "whe_2"));
+    // A tampered ciphertext must not decrypt.
+    const tampered = stored.slice(0, -4) + "AAAA";
+    assert.throws(() => decryptSecret(tampered, "whe_1"));
+  });
+
+  it("reports a missing service key rather than signing with nothing", () => {
+    const saved = process.env.WEBHOOK_SIGNING_KEY;
+    delete process.env.WEBHOOK_SIGNING_KEY;
+    assert.equal(hasSigningKey(), false);
+    assert.throws(() => encryptSecret("x", "whe_1"), MissingSigningKey);
+    if (saved) process.env.WEBHOOK_SIGNING_KEY = saved;
+  });
+});
+
+describe("webhooks are signed with the secret the merchant was given", { skip: !shouldRun }, () => {
+  it("delivers a signature the merchant's own verifier accepts", async () => {
+    process.env.WEBHOOK_SIGNING_KEY = generateServiceKey();
+    const endpointId = `whe_${randomUUID().replace(/-/g, "").slice(0, 20)}`;
+    const secret = "whsec_the_one_the_merchant_stored";
+
+    await pool.query(
+      `INSERT INTO webhook_endpoints (id, merchant_id, url, secret_hash, secret_encrypted, events)
+       VALUES ($1, $2, 'http://127.0.0.1:1/hook', $3, $4, ARRAY['payment.confirmed'])`,
+      [endpointId, merchantId, sha256Hex(secret), encryptSecret(secret, endpointId)],
+    );
+    await enqueue(pool, merchantId, "payment.confirmed", { id: "pay_signed" }, "pay_signed:confirmed");
+
+    let delivered: { signature: string; body: string } | null = null;
+    await deliverDue(pool, {
+      secretFor: (id) => webhookSecret(pool, id),
+      fetchImpl: (async (_url: string, init: RequestInit) => {
+        delivered = {
+          signature: String((init.headers as Record<string, string>)["X-Yozexa-Signature"]),
+          body: String(init.body),
+        };
+        return new Response("ok", { status: 200 });
+      }) as unknown as typeof globalThis.fetch,
+    });
+
+    assert.ok(delivered, "nothing was delivered");
+    const sent = delivered as { signature: string; body: string };
+    // The merchant verifies with the secret they were shown — not a hash of it.
+    assert.equal(verifySignature(secret, sent.body, sent.signature), true);
 
     await pool.query("DELETE FROM webhook_endpoints WHERE id = $1", [endpointId]);
   });

@@ -7,3 +7,4 @@ export * from "./quotes.js";
 export * from "./webhooks.js";
 export * from "./server.js";
 export * from "./paths.js";
+export * from "./secrets.js";
