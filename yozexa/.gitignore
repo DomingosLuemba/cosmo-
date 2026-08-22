@@ -20,3 +20,5 @@ node_key.json
 .env.*
 !.env.example
 .faucet-test/
+.faucet-test/
+dist-test/

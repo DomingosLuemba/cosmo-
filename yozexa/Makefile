@@ -1,0 +1,68 @@
+# YOZEXA monorepo.
+#
+#   make build      build everything
+#   make test       run every test suite
+#   make devnet     bring up the whole stack locally
+#   make check      what CI runs, locally
+
+SHELL := /usr/bin/env bash
+.DEFAULT_GOAL := help
+
+.PHONY: help build test check lint devnet devnet-down devnet-status devnet-reset \
+        chain chain-test fuzz js js-test clean
+
+help:
+	@echo "YOZEXA"
+	@echo
+	@echo "  make build          build the chain binaries and every JavaScript package"
+	@echo "  make test           run every test suite"
+	@echo "  make check          formatting, vet, typecheck and tests — what CI runs"
+	@echo "  make fuzz           a short fuzzing pass over the parsers and state machine"
+	@echo "  make devnet         start the whole stack against a local chain"
+	@echo "  make devnet-status  show what is running"
+	@echo "  make devnet-down    stop it"
+	@echo "  make devnet-reset   wipe the chain data and start fresh"
+	@echo
+	@echo "  Tests that need PostgreSQL skip themselves when DATABASE_URL is unset."
+
+build: chain js
+
+chain:
+	$(MAKE) -C chain build
+
+js:
+	npm install --no-audit --no-fund
+	npm run build
+
+test: chain-test js-test
+
+chain-test:
+	$(MAKE) -C chain test
+
+js-test:
+	npm test
+
+fuzz:
+	$(MAKE) -C chain fuzz
+
+lint:
+	$(MAKE) -C chain lint
+	npm run typecheck
+
+check: lint test
+
+devnet:
+	./scripts/devnet.sh up
+
+devnet-down:
+	./scripts/devnet.sh down
+
+devnet-status:
+	./scripts/devnet.sh status
+
+devnet-reset:
+	./scripts/devnet.sh reset
+
+clean:
+	$(MAKE) -C chain clean
+	rm -rf build node_modules */node_modules */dist */.next wallet/web/.next

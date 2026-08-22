@@ -10,7 +10,7 @@
     "build": "tsc -p tsconfig.json",
     "start": "node dist/cli.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "npm run build && node --test test/*.test.js"
+    "test": "tsc -p tsconfig.test.json && node --test dist-test/indexer/test/*.test.js"
   },
   "dependencies": {
     "@yozexa/sdk": "*",

@@ -14,6 +14,15 @@ business and explorer products built on top of it.
 ## Run it in two minutes
 
 ```bash
+cd yozexa
+make devnet          # chain, API, indexer, Pay, explorer, wallet, business, docs
+make devnet-status
+make devnet-down
+```
+
+Or the chain alone:
+
+```bash
 cd yozexa/chain
 make build                                    # builds ../build/yozexad and yozexa
 
@@ -31,9 +40,6 @@ export YOZEXA_HOME=/tmp/yozexa-localnet
 
 ../build/yozexa supply verify
 ```
-
-Or `make devnet` from the repository root, which brings up the chain, the
-indexer, the API, the explorer and the wallet together.
 
 ## What is here
 
@@ -106,19 +112,37 @@ cryptography.
 ## Tests
 
 ```bash
-cd chain
-make test          # unit, integration, adversarial, randomised property tests
-make fuzz          # short fuzzing pass over parsers, proofs and the state machine
-make lint
+make test    # 98 tests: 48 Go, 50 JavaScript
+make fuzz    # a short pass over the parsers, proofs and the state machine
+make check   # what CI runs
 ```
 
-The suite includes real blocks through the real ABCI interface, adversarial
-tests for supply-cap breaks, grant abuse, double signing, governance capture and
-homograph aliases, and a randomised traffic test that asserts every invariant
-after each of 250 blocks.
+Tests that need PostgreSQL skip themselves when `DATABASE_URL` is unset.
 
-Fuzzing has already found and fixed a real defect in the state store. That is
-what it is for.
+The suite runs real blocks through the real ABCI interface, and includes
+adversarial tests for supply-cap breaks, grant abuse, double signing,
+governance capture and homograph aliases, plus a randomised traffic test that
+asserts every invariant after each of 250 blocks. The Pay tests run against a
+real PostgreSQL rather than a mock, because the properties they check —
+double-crediting, transactional settlement, idempotency — live in the schema.
+
+Fuzzing and a restart test have each already found a real defect. That is what
+they are for; both are described in the git history alongside their fix.
+
+### What has been demonstrated end to end
+
+On a live single-validator localnet, not in a mock:
+
+| | |
+|---|---|
+| Emission | exactly 0.125 YZXA per block, matching the schedule |
+| Payment | 25 YOZ sent from the CLI, settled in a committed block |
+| Restart | node stopped at height 24, resumed at 59, kept producing |
+| Supply audit | `VALID`, every invariant passing |
+| SDK interop | TypeScript signatures accepted by the Go chain, byte for byte |
+| Merchant flow | link → checkout → on-chain payment → settled in ~1s → balances reconcile against the chain |
+| Webhooks | `payment.created` and `payment.confirmed` delivered signed, and verified by an independent receiver |
+| Faucet | proof-of-work required, 10 YZXA paid on chain, replay refused |
 
 ## What YOZEXA will not do
 

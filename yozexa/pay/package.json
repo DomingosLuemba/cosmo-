@@ -10,7 +10,7 @@
     "start": "node dist/server.js",
     "migrate": "node dist/migrate.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "npm run build && node --test dist-test/*.test.js"
+    "test": "npm run build && node --test dist/test/*.test.js"
   },
   "dependencies": {
     "@yozexa/sdk": "*",
