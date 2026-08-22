@@ -92,6 +92,26 @@ wait_for_http() {
 
 # --- commands -----------------------------------------------------------
 
+# Create the Pay database and its role if this machine does not have them yet.
+# Idempotent: running it against an existing database changes nothing.
+ensure_database() {
+  local url="$DATABASE_URL"
+  if psql "$url" -c "SELECT 1" >/dev/null 2>&1; then
+    return 0
+  fi
+  log "creating the yozexa_pay database"
+  local su=""
+  command -v sudo >/dev/null 2>&1 && su="sudo -n -u postgres"
+  ${su:-} psql -c "CREATE USER yozexa WITH PASSWORD 'yozexa_dev' SUPERUSER" >/dev/null 2>&1 || true
+  ${su:-} createdb -O yozexa yozexa_pay >/dev/null 2>&1 || true
+  if ! psql "$url" -c "SELECT 1" >/dev/null 2>&1; then
+    warn "could not create the database automatically; create it by hand:"
+    warn "  sudo -u postgres psql -c \"CREATE USER yozexa WITH PASSWORD '"'"'yozexa_dev'"'"' SUPERUSER\""
+    warn "  sudo -u postgres createdb -O yozexa yozexa_pay"
+    return 1
+  fi
+}
+
 build() {
   log "building the chain binaries"
   (cd "$ROOT/chain" && BUILD_DIR="$BUILD_DIR" make build >/dev/null)
@@ -121,15 +141,46 @@ up() {
   start_bg node "$BUILD_DIR/yozexad" start --home "$HOME_DIR" --api "$NODE_API" --log-level error
   wait_for_http "http://$NODE_API/v1/health" "node API" || die "the node did not start"
 
+  if ! pg_isready -q 2>/dev/null; then
+    # Bring PostgreSQL up if this machine has it but it is not running. Pay and
+    # the indexer are half the stack; skipping them silently is worse than
+    # trying and reporting why it did not work.
+    if command -v pg_ctlcluster >/dev/null 2>&1; then
+      log "starting PostgreSQL"
+      sudo -n pg_ctlcluster 16 main start 2>/dev/null ||
+        pg_ctlcluster 16 main start 2>/dev/null ||
+        service postgresql start >/dev/null 2>&1 || true
+      sleep 2
+    elif command -v brew >/dev/null 2>&1; then
+      brew services start postgresql@16 >/dev/null 2>&1 || true
+      sleep 2
+    fi
+  fi
+
   if pg_isready -q 2>/dev/null; then
+    ensure_database
     (cd "$ROOT" && npm run build --workspace @yozexa/sdk >/dev/null 2>&1) || true
     (cd "$ROOT" && npm run build --workspace @yozexa/indexer >/dev/null 2>&1) || true
     (cd "$ROOT" && npm run build --workspace @yozexa/pay >/dev/null 2>&1) || true
+    # Generated once and kept, so webhook secrets stored on one run can still
+    # be decrypted on the next.
+    if [[ ! -f "$RUN_DIR/webhook-signing.key" ]]; then
+      openssl rand -base64 32 > "$RUN_DIR/webhook-signing.key" 2>/dev/null ||
+        node -e "console.log(require('crypto').randomBytes(32).toString('base64'))" \
+          > "$RUN_DIR/webhook-signing.key"
+      chmod 600 "$RUN_DIR/webhook-signing.key"
+    fi
     start_bg pay env YOZEXA_NODE="http://$NODE_API" PAY_PORT="$PAY_PORT" \
-      YOZEXA_ENVIRONMENT=test node "$ROOT/pay/dist/src/server.js"
+      YOZEXA_ENVIRONMENT=test \
+      WEBHOOK_SIGNING_KEY="$(cat "$RUN_DIR/webhook-signing.key")" \
+      node "$ROOT/pay/dist/src/server.js"
     wait_for_http "http://127.0.0.1:$PAY_PORT/v1/health" "YOZEXA Pay" 20 || true
   else
-    warn "PostgreSQL is not reachable — skipping YOZEXA Pay and the indexer"
+    warn "PostgreSQL is not reachable — YOZEXA Pay and the indexer are not running."
+    warn "Start it, then run this script again:"
+    warn "  Linux:  sudo service postgresql start"
+    warn "  macOS:  brew services start postgresql@16"
+    warn "  Docker: docker compose -f infrastructure/docker/compose.dev.yml up -d postgres"
   fi
 
   for app in "explorer:$EXPLORER_PORT:$ROOT/explorer" \
@@ -142,9 +193,12 @@ up() {
       log "building $name"
       (cd "$dir" && npx next build >/dev/null 2>&1) || { warn "$name failed to build"; continue; }
     fi
-    start_bg "$name" env YOZEXA_NODE="http://$NODE_API" \
+    # `next start` takes the directory as a positional argument, and resolves
+    # node_modules from the working directory, so run it from inside the app.
+    start_bg "$name" env -C "$dir" YOZEXA_NODE="http://$NODE_API" \
       PAY_API="http://127.0.0.1:$PAY_PORT" \
-      npx --prefix "$dir" next start --dir "$dir" -p "$port"
+      npx next start -p "$port"
+    wait_for_http "http://127.0.0.1:$port/" "$name" 30 || true
   done
 
   echo
