@@ -328,6 +328,13 @@ func (a *App) FinalizeBlock(_ context.Context, req *abci.RequestFinalizeBlock) (
 		return nil, err
 	}
 
+	// Record the block time so read-only queries can evaluate time-dependent
+	// views (vesting, grant expiry) against the chain's own clock rather than
+	// the machine's.
+	if err := a.kv.Set([]byte("chain/last_block_time"), []byte(fmt.Sprintf("%d", now))); err != nil {
+		return nil, err
+	}
+
 	if a.invariantsEveryBlock {
 		if err := a.CheckInvariants(now); err != nil {
 			// A broken invariant means the ledger no longer adds up. Halting
