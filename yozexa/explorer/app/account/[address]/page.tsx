@@ -38,8 +38,8 @@ export default async function AccountPage({ params }: { params: Promise<{ addres
   const spendable = BigInt(a.spendable);
   const lockedPct = balance > 0n ? Number((locked * 10_000n) / balance) / 100 : 0;
 
-  const stakes = "data" in delegations ? delegations.data.delegations : [];
-  const permissions = "data" in grants ? grants.data.grants : [];
+  const stakes = ("data" in delegations ? delegations.data.delegations : null) ?? [];
+  const permissions = ("data" in grants ? grants.data.grants : null) ?? [];
 
   return (
     <>

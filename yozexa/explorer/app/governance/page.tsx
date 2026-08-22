@@ -29,7 +29,7 @@ export default async function GovernancePage() {
     );
   }
 
-  const list = proposals.data.proposals as Array<Record<string, string | number>>;
+  const list = (proposals.data.proposals ?? []) as Array<Record<string, string | number>>;
   const p = "data" in params ? (params.data as Record<string, string | number>) : null;
 
   return (

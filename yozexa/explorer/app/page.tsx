@@ -36,8 +36,8 @@ export default async function OverviewPage() {
   const max = sup ? BigInt(String(sup.max_supply)) : 1n;
   const mintedPct = max > 0n ? Number((minted * 10_000n) / max) / 100 : 0;
 
-  const validatorList =
-    "data" in validators ? (validators.data.validators as Array<Record<string, unknown>>) : [];
+  const validatorList = (("data" in validators ? validators.data.validators : null) ??
+    []) as Array<Record<string, unknown>>;
   const active = validatorList.filter((v) => v.active === true).length;
   const totalBonded = "data" in validators ? BigInt(validators.data.total_bonded || "0") : 0n;
 
@@ -104,8 +104,8 @@ export default async function OverviewPage() {
             </tr>
           </thead>
           <tbody>
-            {"data" in blocks && blocks.data.blocks.length > 0 ? (
-              blocks.data.blocks.map((b) => {
+            {"data" in blocks && (blocks.data.blocks ?? []).length > 0 ? (
+              (blocks.data.blocks ?? []).map((b) => {
                 const block = b as { height: number; time: string; transaction_count: number; hash: string };
                 return (
                   <tr key={block.height}>

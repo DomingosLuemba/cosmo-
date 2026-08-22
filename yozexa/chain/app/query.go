@@ -176,7 +176,7 @@ func (a *App) Query(_ context.Context, req *abci.RequestQuery) (*abci.ResponseQu
 		if err != nil {
 			return queryError(CodeDecodeError, err.Error(), height), nil
 		}
-		var out []state.UnbondingEntry
+		out := []state.UnbondingEntry{}
 		if err := s.Store().Iterate([]byte(state.PrefixUnbonding), func(_, value []byte) bool {
 			var e state.UnbondingEntry
 			if err := json.Unmarshal(value, &e); err != nil {
@@ -199,7 +199,7 @@ func (a *App) Query(_ context.Context, req *abci.RequestQuery) (*abci.ResponseQu
 		return respond(map[string]any{"vesting": positions})
 
 	case path == "proposals":
-		var out []state.Proposal
+		out := []state.Proposal{}
 		if err := s.IterateProposals(func(p state.Proposal) bool {
 			out = append(out, p)
 			return true
@@ -244,7 +244,7 @@ func (a *App) Query(_ context.Context, req *abci.RequestQuery) (*abci.ResponseQu
 		if err != nil {
 			return queryError(CodeDecodeError, err.Error(), height), nil
 		}
-		var out []state.Grant
+		out := []state.Grant{}
 		if err := s.IterateGrantsOf(addr, func(g state.Grant) bool {
 			out = append(out, g)
 			return true
@@ -365,7 +365,7 @@ func (a *App) accountView(addr types.Address) (AccountView, error) {
 
 func (a *App) delegationsOf(addr types.Address) ([]map[string]any, error) {
 	s := a.state
-	var out []map[string]any
+	out := []map[string]any{}
 	var iterErr error
 	err := s.IterateAllDelegations(func(d state.Delegation) bool {
 		if d.Delegator != addr {
@@ -410,7 +410,7 @@ func (a *App) delegationsOf(addr types.Address) ([]map[string]any, error) {
 
 func (a *App) vestingPositions() ([]state.VestingStatus, error) {
 	now := a.lastBlockTimeUnix()
-	var out []state.VestingStatus
+	out := []state.VestingStatus{}
 	var iterErr error
 	err := a.state.IterateVesting(func(v state.VestingSchedule) bool {
 		st, err := v.Status(now)

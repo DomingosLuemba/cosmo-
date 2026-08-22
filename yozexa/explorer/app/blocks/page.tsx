@@ -19,7 +19,7 @@ export default async function BlocksPage({
     );
   }
 
-  const blocks = result.data.blocks as Array<{
+  const blocks = (result.data.blocks ?? []) as Array<{
     height: number;
     time: string;
     transaction_count: number;

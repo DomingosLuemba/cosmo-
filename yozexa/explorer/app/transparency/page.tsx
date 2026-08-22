@@ -22,7 +22,7 @@ export default async function TransparencyPage() {
     );
   }
 
-  const positions = vesting.data.vesting as Array<Record<string, string | number>>;
+  const positions = (vesting.data.vesting ?? []) as Array<Record<string, string | number>>;
   const modules = ("data" in report ? (report.data.module_balances as Record<string, string>) : {}) ?? {};
 
   const byCategory = (category: string) => positions.filter((p) => p.category === category);

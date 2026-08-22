@@ -146,7 +146,7 @@ func (s *State) IterateValidators(fn func(Validator) bool) error {
 // AllValidators returns every validator, sorted by operator address so the
 // result is identical on every node.
 func (s *State) AllValidators() ([]Validator, error) {
-	var out []Validator
+	out := []Validator{}
 	err := s.IterateValidators(func(v Validator) bool {
 		out = append(out, v)
 		return true

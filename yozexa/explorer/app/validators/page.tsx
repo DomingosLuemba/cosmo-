@@ -15,7 +15,7 @@ export default async function ValidatorsPage() {
     );
   }
 
-  const validators = result.data.validators as Array<Record<string, string | number | boolean>>;
+  const validators = (result.data.validators ?? []) as Array<Record<string, string | number | boolean>>;
   const totalBonded = BigInt(result.data.total_bonded || "0");
   const sorted = [...validators].sort((a, b) => {
     const at = BigInt(String(a.tokens || "0"));
