@@ -19,6 +19,7 @@ import { generateApiKey, sha256Hex, authenticate, AuthError, RateLimiter } from 
 import { fingerprint, IdempotencyConflict, lookup, store } from "../src/idempotency.js";
 import { PaymentsService, PaymentError } from "../src/payments.js";
 import { NoPriceSource, HttpPriceSource, quoteFiat, QuoteUnavailable } from "../src/quotes.js";
+import { collect as collectMetrics, render as renderMetrics } from "../src/metrics.js";
 import { signPayload, verifySignature, enqueue, deliverDue } from "../src/webhooks.js";
 import { newMerchantId, newApiKeyId } from "../src/ids.js";
 import { migrationsDir } from "../src/paths.js";
@@ -564,5 +565,64 @@ describe("webhooks are signed with the secret the merchant was given", { skip: !
     assert.equal(verifySignature(secret, sent.body, sent.signature), true);
 
     await pool.query("DELETE FROM webhook_endpoints WHERE id = $1", [endpointId]);
+  });
+});
+
+describe("metrics", { skip: !shouldRun }, () => {
+  it("reports payments by status, from the database", async () => {
+    await payments.create({
+      merchantId,
+      amount: 5n * ONE_YZXA,
+      description: "metrics",
+      reference: "metrics-1",
+    });
+
+    const samples = await collectMetrics(pool, "http://127.0.0.1:1", "test");
+    const created = samples.find(
+      (s) => s.name === "yozexa_pay_payments" && s.labels?.status === "created",
+    );
+    assert.ok(created, "no payment count was reported");
+    assert.ok(created.value >= 1, `expected at least one created payment, got ${created.value}`);
+
+    // Money is reported in whole YZXA, not base units: a float64 stops
+    // counting integers one at a time long before 10^18 does.
+    const value = samples.find(
+      (s) => s.name === "yozexa_pay_payments_value_yzxa" && s.labels?.status === "created",
+    );
+    assert.ok(value, "no payment value was reported");
+    assert.ok(value.value >= 5, `expected at least 5 YZXA, got ${value.value}`);
+  });
+
+  it("says the database is up, and the node is not when it cannot be reached", async () => {
+    const samples = await collectMetrics(pool, "http://127.0.0.1:1", "test");
+    assert.equal(samples.find((s) => s.name === "yozexa_pay_database_up")?.value, 1);
+    // Port 1 answers nothing. An unreachable node has to read as 0, not as a
+    // missing series — settlement stops when Pay cannot see the chain, and an
+    // absent metric looks the same as a healthy one on a dashboard.
+    assert.equal(samples.find((s) => s.name === "yozexa_pay_node_up")?.value, 0);
+  });
+
+  it("renders the exposition format a scraper accepts", () => {
+    const out = renderMetrics([
+      { name: "a", help: "first", kind: "gauge", value: 1 },
+      { name: "a", help: "first", kind: "gauge", value: 2, labels: { status: "created" } },
+      { name: "b", help: "second", kind: "counter", value: 3 },
+    ]);
+    // HELP and TYPE appear once per name, before the first sample. A scraper
+    // rejects the whole response otherwise, and a rejected scrape looks
+    // exactly like a healthy one with no alerts firing.
+    assert.equal(out.match(/# HELP a /g)?.length, 1);
+    assert.equal(out.match(/# TYPE a /g)?.length, 1);
+    assert.ok(out.includes('a{status="created"} 2'));
+    assert.ok(out.includes("# TYPE b counter\nb 3\n"));
+  });
+
+  it("escapes label values once, not twice", () => {
+    const out = renderMetrics([
+      { name: "m", help: "h", kind: "gauge", value: 1, labels: { note: 'a"b', zebra: "z", alpha: "a" } },
+    ]);
+    // Sorted keys, and a quote escaped exactly once — double-escaping would
+    // reach the scraper as a\\"b.
+    assert.ok(out.includes('m{alpha="a",note="a\\"b",zebra="z"} 1'), out);
   });
 });

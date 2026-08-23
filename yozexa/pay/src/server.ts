@@ -14,6 +14,7 @@ import { YozexaClient } from "@yozexa/sdk";
 
 import { authenticate, AuthError, RateLimiter, requireScope, sha256Hex, type ApiKeyRecord } from "./auth.js";
 import { loadConfig, type Config } from "./config.js";
+import { collect as collectMetrics, render as renderMetrics } from "./metrics.js";
 import { fingerprint, IdempotencyConflict, lookup, store } from "./idempotency.js";
 import { PaymentError, PaymentsService, publicPayment } from "./payments.js";
 import { HttpPriceSource, NoPriceSource, QuoteUnavailable, type PriceSource } from "./quotes.js";
@@ -81,6 +82,14 @@ export class PayServer {
 
     // Unauthenticated endpoints.
     if (url.pathname === "/v1/health") return send(res, 200, { status: "ok", environment: this.config.environment });
+    // Prometheus scrape target. Unversioned and outside /v1: it is an
+    // operational surface, not part of the API merchants integrate against.
+    if (url.pathname === "/metrics") {
+      const samples = await collectMetrics(this.pool, this.config.nodeUrl, this.config.environment);
+      res.writeHead(200, { "Content-Type": "text/plain; version=0.0.4; charset=utf-8" });
+      res.end(renderMetrics(samples));
+      return;
+    }
     if (url.pathname.startsWith("/pay/")) return this.#handleCheckout(url, res);
 
     if (!url.pathname.startsWith("/v1/")) return send(res, 404, { error: "not found" });

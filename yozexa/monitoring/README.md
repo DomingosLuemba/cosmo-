@@ -94,8 +94,29 @@ Nothing fires on a metric that is merely unusual. An alert that cries wolf is
 worse than no alert, because it teaches whoever carries the pager to ignore the
 one that matters.
 
+## YOZEXA Pay
+
+Pay serves `/metrics` on its own port, in the same format. Its failures are the
+quiet kind: payments that never settle because the node is unreachable,
+webhooks that pile up undelivered. Nothing throws — the merchant simply stops
+being paid, and hears about it from a customer.
+
+| Metric | |
+|---|---|
+| `yozexa_pay_database_up` | 0 means nothing can settle at all |
+| `yozexa_pay_node_up` | 0 means customers can pay on-chain and never be credited |
+| `yozexa_pay_node_height` | flat means settlement is not advancing |
+| `yozexa_pay_payments{status}` | counts by status; a rising `expired` beside a flat `confirmed` is the shape of a settlement problem |
+| `yozexa_pay_payments_value_yzxa{status}` | their value, in YZXA |
+| `yozexa_pay_webhooks_pending` | still being retried |
+| `yozexa_pay_webhooks_exhausted` | gave up — each one is a merchant who was never told |
+| `yozexa_pay_webhooks_oldest_pending_seconds` | how far behind delivery is |
+| `yozexa_pay_merchants` | registered merchants |
+
+Five more alert rules cover them, in the `yozexa-pay` group.
+
 ## What this does not cover
 
-There is no tracing, no per-endpoint latency, no request rate, and no metrics
-at all from Pay, the indexer or the web apps. Those are worth having before
-mainnet and are not here yet.
+No tracing, no per-endpoint latency, no request rate. The indexer and the web
+apps publish nothing at all. Those are worth having before mainnet and are not
+here yet.

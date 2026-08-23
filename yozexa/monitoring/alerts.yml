@@ -176,3 +176,65 @@ groups:
           description: >-
             Something is pointed at the wrong network. A wallet reading from it
             would show balances from a chain that is not the one it thinks.
+
+  # --- YOZEXA Pay ------------------------------------------------------
+  #
+  # Pay sits between a merchant and the chain, and its failures are quiet:
+  # payments that never settle, webhooks that pile up undelivered. Nobody
+  # gets an error. The merchant simply stops being paid, and finds out from
+  # a customer.
+  - name: yozexa-pay
+    interval: 30s
+    rules:
+      - alert: YozexaPayDatabaseDown
+        expr: yozexa_pay_database_up == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Pay cannot reach its database"
+          description: >-
+            Nothing settles, no payment can be created, and every merchant
+            integration is failing right now.
+
+      - alert: YozexaPayNodeUnreachable
+        expr: yozexa_pay_node_up == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Pay cannot reach the YOZEXA node"
+          description: >-
+            Settlement watches the chain. While this holds, customers can pay
+            on-chain and never be credited — the money arrives, the order does
+            not complete.
+
+      - alert: YozexaPaySettlementStalled
+        expr: increase(yozexa_pay_node_height[5m]) == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "The chain height Pay sees has not moved in five minutes"
+          description: >-
+            Either the chain has halted or Pay is reading a stale node. Check
+            yozexa_block_height on the validators before assuming which.
+
+      - alert: YozexaPayWebhooksExhausted
+        expr: increase(yozexa_pay_webhooks_exhausted[1h]) > 0
+        for: 0s
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $value }} webhook(s) gave up after every retry"
+          description: >-
+            Each one is a merchant who was never told about a payment that
+            did happen. Their records and the chain now disagree.
+
+      - alert: YozexaPayWebhookBacklog
+        expr: yozexa_pay_webhooks_oldest_pending_seconds > 900
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "A webhook has been undelivered for over fifteen minutes"
