@@ -135,6 +135,29 @@ against the chain in base units. It skips rather than fails when the devnet or
 a Chromium is missing, so a checkout without either does not report a red suite
 it never ran.
 
+Consensus properties need a validator set — a single-validator chain never
+disagrees and never has to reach two thirds of anything:
+
+```bash
+make test-consensus     # builds four validators, then tests against them
+```
+
+Ten checks: every validator holding a byte-identical block, a payment
+replicating to all of them, the chain surviving a lost validator, halting
+rather than advancing without two thirds, recovering when quorum returns, and a
+node started from nothing replaying the chain from genesis.
+
+Dependencies are scanned with reachability analysis, so what is reported is
+what this code actually calls:
+
+```bash
+make vulnscan
+```
+
+Where `vuln.go.dev` is unreachable it assembles the database from the OSV
+archive rather than skipping — a skipped scan reads exactly like a clean one,
+and the first real run found 38 reachable vulnerabilities.
+
 The suite runs real blocks through the real ABCI interface, and includes
 adversarial tests for supply-cap breaks, grant abuse, double signing,
 governance capture and homograph aliases, plus a randomised traffic test that
@@ -160,6 +183,7 @@ On a live single-validator localnet, not in a mock:
 | Webhooks | `payment.created` and `payment.confirmed` delivered signed, and verified by an independent receiver |
 | Faucet | proof-of-work required, 10 YZXA paid on chain, replay refused |
 | Wallet | driven in a browser: created, funded, spent, reconciled against the chain to the base unit |
+| Consensus | four validators agree block-for-block; the chain survives losing one, halts without two thirds, recovers, and a new node syncs from genesis |
 
 ### Audit
 

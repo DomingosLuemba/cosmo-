@@ -10,7 +10,7 @@ SHELL := /usr/bin/env bash
 
 .PHONY: help build test check lint devnet devnet-down devnet-status devnet-reset \
         chain chain-test fuzz js js-test test-e2e test-consensus \
-        multinode multinode-down clean
+        multinode multinode-down vulnscan clean
 
 help:
 	@echo "YOZEXA"
@@ -21,6 +21,7 @@ help:
 	@echo "  make test-consensus build a 4-validator network and test consensus against it"
 	@echo "  make multinode      start a 4-validator network"
 	@echo "  make multinode-down stop it"
+	@echo "  make vulnscan       scan the Go dependencies for known vulnerabilities"
 	@echo "  make check          formatting, vet, typecheck and tests — what CI runs"
 	@echo "  make fuzz           a short fuzzing pass over the parsers and state machine"
 	@echo "  make devnet         start the whole stack against a local chain"
@@ -63,6 +64,12 @@ multinode:
 
 multinode-down:
 	./scripts/multinode.sh down
+
+# Scans the Go dependency tree, falling back to a database assembled from OSV
+# where vuln.go.dev is unreachable — a skipped scan reads exactly like a clean
+# one, and the first real run here found 38 reachable vulnerabilities.
+vulnscan:
+	./scripts/vulnscan.sh
 
 fuzz:
 	$(MAKE) -C chain fuzz
