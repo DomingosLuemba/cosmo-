@@ -155,6 +155,10 @@ func (g Genesis) Validate() error {
 			}
 		}
 	}
+	if err := checkReservedVesting(g.Vesting); err != nil {
+		return err
+	}
+
 	if g.FundAllocations {
 		for _, amt := range []int64{
 			AllocEcosystemYZXA, AllocLiquidityYZXA, AllocTreasuryYZXA, AllocSecurityYZXA,
@@ -252,4 +256,59 @@ func (g Genesis) MarshalIndent() ([]byte, error) {
 	sort.Slice(g.Vesting, func(i, j int) bool { return g.Vesting[i].Address.Hex() < g.Vesting[j].Address.Hex() })
 	sort.Slice(g.Validators, func(i, j int) bool { return g.Validators[i].Operator.Hex() < g.Validators[j].Operator.Hex() })
 	return json.MarshalIndent(g, "", "  ")
+}
+
+// reservedVestingTerms are the published terms for the two categories the
+// project commits to publicly. They are not defaults a genesis may adjust.
+var reservedVestingTerms = map[string]struct {
+	AllocationYZXA int64
+	CliffSeconds   int64
+	DurationYears  int64
+	Duration       int64
+}{
+	state.VestingCategoryFounder: {AllocFounderYZXA, FounderCliffSeconds, 8, FounderDurationSeconds},
+	state.VestingCategoryTeam:    {AllocTeamYZXA, TeamCliffSeconds, 6, TeamDurationSeconds},
+}
+
+// checkReservedVesting enforces the founder and team terms.
+//
+// Without this the allocation table above is a comment: a genesis could name a
+// position "founder" and give it any size and any cliff, and every other check
+// would pass as long as the total stayed under the supply cap. The categories
+// are what the explorer, the wallet and the whitepaper all report, so a
+// position that claims one has to match the published terms exactly.
+//
+// A network that has no founder or team position — a devnet, a testnet — is
+// fine. What is refused is claiming the category and not honouring it.
+func checkReservedVesting(positions []GenesisVesting) error {
+	seen := map[string]bool{}
+	for _, v := range positions {
+		terms, reserved := reservedVestingTerms[v.Category]
+		if !reserved {
+			continue
+		}
+		if seen[v.Category] {
+			return fmt.Errorf(
+				"genesis: more than one %q vesting position; the %s allocation is a single position of %d YZXA",
+				v.Category, v.Category, terms.AllocationYZXA)
+		}
+		seen[v.Category] = true
+
+		if want := types.YZXA(terms.AllocationYZXA); v.Total.Int().Cmp(want) != 0 {
+			return fmt.Errorf(
+				"genesis: %q allocation is %s YZXA; the published allocation is %d YZXA and this is not adjustable",
+				v.Category, types.FormatYZXA(v.Total.Int()), terms.AllocationYZXA)
+		}
+		if v.CliffSeconds != terms.CliffSeconds {
+			return fmt.Errorf(
+				"genesis: %q cliff is %d seconds; the published cliff is %d seconds (%d years)",
+				v.Category, v.CliffSeconds, terms.CliffSeconds, terms.CliffSeconds/Year)
+		}
+		if v.DurationSeconds != terms.Duration {
+			return fmt.Errorf(
+				"genesis: %q vesting runs %d seconds; the published schedule is %d seconds (%d years)",
+				v.Category, v.DurationSeconds, terms.Duration, terms.DurationYears)
+		}
+	}
+	return nil
 }

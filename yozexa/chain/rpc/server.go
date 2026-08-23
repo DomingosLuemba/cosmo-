@@ -171,12 +171,27 @@ func (s *Server) proxyQuery(path string) http.HandlerFunc {
 }
 
 // handlePathQuery forwards /v1/{kind}/{id} to the matching ABCI query path.
+// addressKeyedQueries are the path queries whose {id} is an account or
+// validator address. Their input is checked before the query runs, so a
+// malformed address answers "you sent something that is not an address" rather
+// than "no such account" — a client cannot tell a typo from an empty account
+// otherwise.
+var addressKeyedQueries = map[string]bool{
+	"validator": true, "delegations": true, "unbonding": true, "grants": true,
+}
+
 func (s *Server) handlePathQuery(kind string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id := strings.TrimPrefix(r.URL.Path, "/v1/"+kind+"/")
 		if id == "" || strings.Contains(id, "/") {
 			writeError(w, http.StatusBadRequest, "expected /v1/%s/{id}", kind)
 			return
+		}
+		if addressKeyedQueries[kind] {
+			if _, err := types.ParseAnyAddress(id); err != nil {
+				writeError(w, http.StatusBadRequest, "%v", err)
+				return
+			}
 		}
 		raw, err := s.query(kind + "/" + id)
 		if err != nil {
@@ -193,6 +208,13 @@ func (s *Server) handleAccount(w http.ResponseWriter, r *http.Request) {
 	rest := strings.TrimPrefix(r.URL.Path, "/v1/account/")
 	if rest == "" {
 		writeError(w, http.StatusBadRequest, "expected /v1/account/{address}")
+		return
+	}
+	// A malformed address is a bad request, not a missing account. Answering
+	// 404 for both tells a wallet that a mistyped address is simply an account
+	// with no history, which is how a typo turns into a lost payment.
+	if _, err := types.ParseAnyAddress(rest); err != nil {
+		writeError(w, http.StatusBadRequest, "%v", err)
 		return
 	}
 	path := "account/" + rest

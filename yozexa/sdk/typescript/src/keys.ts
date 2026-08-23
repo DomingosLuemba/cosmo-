@@ -15,6 +15,7 @@ import { addressFromPubKey } from "./address.js";
  */
 export class PrivateKey {
   readonly #scalar: Uint8Array;
+  #destroyed = false;
 
   private constructor(scalar: Uint8Array) {
     this.#scalar = scalar;
@@ -86,14 +87,46 @@ export class PrivateKey {
    * for the same intent, and therefore a different transaction hash.
    */
   sign(message: Uint8Array): Uint8Array {
+    if (this.#destroyed) {
+      throw new Error("this key has been destroyed and can no longer sign");
+    }
     const digest = sha256(message);
     const signature = secp256k1.sign(digest, this.#scalar, { lowS: true });
     return signature.toCompactRawBytes();
   }
 
-  /** The raw scalar. Secret material — do not log, store or transmit it. */
+  /**
+   * The raw scalar. Secret material — do not log, store or transmit it.
+   *
+   * This is a **copy**: zeroing what you get back does not erase the key.
+   * Zero your copy when you are done with it, and call `destroy()` to erase
+   * the key itself.
+   */
   toBytes(): Uint8Array {
     return Uint8Array.from(this.#scalar);
+  }
+
+  /**
+   * Erase the private scalar in place.
+   *
+   * After this the key can no longer sign, and the secret is gone from the
+   * buffer rather than waiting for the garbage collector. This is what a
+   * wallet's lock has to call: zeroing a copy from `toBytes()` leaves the
+   * real scalar in memory, recoverable from a heap snapshot.
+   *
+   * It cannot erase copies already handed out, or intermediate buffers the
+   * runtime made — a JavaScript engine gives no guarantee about either. It
+   * removes the one copy this object controls, which is the difference
+   * between a lock that erases the key and a lock that only forgets it.
+   */
+  destroy(): void {
+    this.#scalar.fill(0);
+    this.#destroyed = true;
+  }
+
+  /** True once `destroy()` has erased the scalar. */
+  get destroyed(): boolean {
+    return this.#destroyed;
   }
 }
 

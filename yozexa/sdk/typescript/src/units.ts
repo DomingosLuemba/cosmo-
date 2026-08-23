@@ -94,20 +94,54 @@ export function formatForDisplay(value: bigint): { amount: string; unit: Unit } 
  * guarantee, and the caller is responsible for labelling it as such and for
  * showing when it was fetched. Pass `null` when no price is available: this
  * returns `null` rather than inventing a number.
+ *
+ * Prefer passing the rate as a decimal **string**, exactly as the source wrote
+ * it: a rate handed over as a number has already been rounded by the time it
+ * arrives, and above roughly 9 × 10^9 units per YZXA a double can no longer
+ * represent the scaled rate exactly. A string is scaled into integers here and
+ * loses nothing.
+ *
+ * The result is a formatted string for a person to read. It is never an amount
+ * to send — everything that moves money works in base units.
  */
 export function fiatReference(
   value: bigint,
-  priceYZXA: number | null,
+  priceYZXA: number | string | null,
   currency: string,
   locale = "en-US",
 ): string | null {
-  if (priceYZXA === null || !Number.isFinite(priceYZXA) || priceYZXA < 0) return null;
-  // Convert with bigint arithmetic down to cents before touching a float, so
-  // the rounding happens once and at a known place.
-  const micros = BigInt(Math.round(priceYZXA * 1_000_000));
+  if (priceYZXA === null) return null;
+  const text = typeof priceYZXA === "number"
+    ? (Number.isFinite(priceYZXA) && priceYZXA >= 0 ? String(priceYZXA) : null)
+    : priceYZXA.trim();
+  if (text === null) return null;
+
+  const micros = scaleDecimalString(text, 6);
+  if (micros < 0n) return null;
   const cents = (value * micros) / (ONE_YZXA * 10_000n);
+  // The only float in this function, and only to hand a cent count to the
+  // formatter: exact for any amount below about 90 trillion units of currency.
   return new Intl.NumberFormat(locale, {
     style: "currency",
     currency,
   }).format(Number(cents) / 100);
+}
+
+/**
+ * Scale a non-negative decimal string by 10^decimals, exactly, in integer
+ * arithmetic. Digits past `decimals` are truncated.
+ *
+ * Returns -1n for anything that is not a non-negative decimal, which callers
+ * treat as "no usable rate" rather than as zero.
+ */
+export function scaleDecimalString(value: string, decimals: number): bigint {
+  const m = /^(\d*)(?:\.(\d+))?(?:[eE]([+-]?\d+))?$/.exec(value.trim());
+  if (!m) return -1n;
+  const whole = m[1] ?? "";
+  const fraction = m[2] ?? "";
+  if (whole === "" && fraction === "") return -1n;
+  const digits = BigInt((whole + fraction) || "0");
+  const shift = decimals - fraction.length + (m[3] ? Number(m[3]) : 0);
+  if (shift >= 0) return digits * 10n ** BigInt(shift);
+  return digits / 10n ** BigInt(-shift);
 }

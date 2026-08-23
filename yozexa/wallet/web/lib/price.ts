@@ -19,8 +19,15 @@ export const FIAT_CURRENCIES: readonly FiatCurrency[] = ["USD", "EUR", "AOA", "G
 
 export interface PriceQuote {
   currency: FiatCurrency;
-  /** Price of one whole YZXA, in the currency. */
-  price: number;
+  /**
+   * Price of one whole YZXA, in the currency, as the source wrote it.
+   *
+   * A decimal string rather than a number: every conversion below scales it
+   * into integers, and a rate that arrives as a float has already been rounded
+   * once before anyone can see it. Display code that wants a number can parse
+   * it — nothing that produces an amount does.
+   */
+  price: string;
   /** Who said so. Shown to the user. */
   source: string;
   fetchedAt: Date;
@@ -102,9 +109,12 @@ export async function fetchPrice(currency = displayCurrency()): Promise<PriceRes
     if (!response.ok) throw new Error(`the price source returned ${response.status}`);
     const body = (await response.json()) as Record<string, unknown>;
     const raw = body[currency];
-    const price = typeof raw === "number" ? raw : Number(raw);
-    if (!Number.isFinite(price) || price <= 0) {
-      throw new Error(`the price source did not return a ${currency} price`);
+    // A JSON string keeps every digit the source sent; a JSON number has
+    // already been through a double, so the shortest text that reads back as
+    // that double loses nothing further.
+    const price = typeof raw === "string" ? raw.trim() : typeof raw === "number" ? String(raw) : "";
+    if (scalePrice(price) <= 0n) {
+      throw new Error(`the price source did not return a usable ${currency} price`);
     }
     const result: PriceQuote = {
       currency,
@@ -125,6 +135,29 @@ export async function fetchPrice(currency = displayCurrency()): Promise<PriceRes
 
 const ONE_YZXA = 10n ** 18n;
 
+/** Decimal digits of the rate that are kept. */
+const PRICE_DECIMALS = 6;
+
+/**
+ * Scale a decimal price string into an integer, exactly, in integer
+ * arithmetic. Digits past `PRICE_DECIMALS` are truncated.
+ *
+ * Returns 0n for anything unparseable, which every caller treats as no price —
+ * a wallet that cannot read a rate must show no fiat figure, never a wrong one.
+ * Accepts exponent form, which is how `String(1e-7)` reaches this function.
+ */
+export function scalePrice(value: string): bigint {
+  const m = /^(\d*)(?:\.(\d+))?(?:[eE]([+-]?\d+))?$/.exec(value.trim());
+  if (!m) return 0n;
+  const whole = m[1] ?? "";
+  const fraction = m[2] ?? "";
+  if (whole === "" && fraction === "") return 0n;
+  const digits = BigInt((whole + fraction) || "0");
+  const shift = PRICE_DECIMALS - fraction.length + (m[3] ? Number(m[3]) : 0);
+  if (shift >= 0) return digits * 10n ** BigInt(shift);
+  return digits / 10n ** BigInt(-shift);
+}
+
 /**
  * Convert a base-unit amount into a fiat string, or null when there is no
  * price.
@@ -133,7 +166,7 @@ const ONE_YZXA = 10n ** 18n;
  * so the single rounding happens in one place that can be pointed at.
  */
 export function toFiat(baseUnits: bigint, quote: PriceQuote, locale = "en-US"): string {
-  const micros = BigInt(Math.round(quote.price * 1_000_000));
+  const micros = scalePrice(quote.price);
   const minor = (baseUnits * micros) / (ONE_YZXA * 10_000n);
   return new Intl.NumberFormat(locale, {
     style: "currency",
@@ -144,7 +177,7 @@ export function toFiat(baseUnits: bigint, quote: PriceQuote, locale = "en-US"): 
 
 /** Convert a fiat minor-unit amount into base units, rounding up. */
 export function fromFiatMinor(minorUnits: bigint, quote: PriceQuote): bigint {
-  const micros = BigInt(Math.round(quote.price * 1_000_000));
+  const micros = scalePrice(quote.price);
   if (micros <= 0n) return 0n;
   const numerator = minorUnits * ONE_YZXA * 10_000n;
   return (numerator + micros - 1n) / micros;

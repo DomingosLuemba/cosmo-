@@ -149,6 +149,48 @@ describe("quoting", () => {
     assert.ok(quote.amount >= exact, `${quote.amount} < ${exact}`);
     assert.ok(quote.amount - exact <= 1n, "rounded up by more than one base unit");
   });
+
+  // A double stops representing the scaled rate exactly at about 9,007 units
+  // per YZXA. The conversion has to stay exact past that, or a high valuation
+  // quietly starts pricing on a rounded rate.
+  it("stays exact above the range a double can represent", async () => {
+    const source = new HttpPriceSource("test", "http://price.invalid", 0, async () =>
+      new Response(JSON.stringify({ EUR: "90087.1234567891" }), { status: 200 }),
+    );
+    const quote = await quoteFiat(source, 100_000n, "EUR", 60);
+    // rate in minor units, scaled by 10^10, computed here as integers.
+    const rateScaled = 900871234567891n * 100n;
+    const expected = (100_000n * ONE_YZXA * 10_000_000_000n + rateScaled - 1n) / rateScaled;
+    assert.equal(quote.amount, expected);
+  });
+
+  // A receipt states the rate the payment was priced at. If the amount cannot
+  // be recomputed from it, the receipt cannot be reconciled.
+  it("reports the rate it actually applied", async () => {
+    for (const price of ["2", "0.0234", "1234.5678901234", "90087.1234567891"]) {
+      const source = new HttpPriceSource("test", "http://price.invalid", 0, async () =>
+        new Response(JSON.stringify({ EUR: price }), { status: 200 }),
+      );
+      const quote = await quoteFiat(source, 4999n, "EUR", 60);
+      const [whole = "0", fraction = ""] = quote.rate.split(".");
+      const reported = BigInt(whole + fraction.padEnd(10, "0").slice(0, 10));
+      const rateScaled = reported * 100n;
+      const recomputed = (4999n * ONE_YZXA * 10_000_000_000n + rateScaled - 1n) / rateScaled;
+      assert.equal(quote.amount, recomputed, `rate ${quote.rate} does not reproduce the amount for ${price}`);
+    }
+  });
+
+  // A rate finer than the ten decimals kept would scale to zero, and quoting
+  // against zero is a division by nothing. Refusing is the only safe answer.
+  it("refuses a price it cannot read, or one below its resolution", async () => {
+    for (const bad of ["", "abc", "-5", "0", "NaN", "1.2.3", "0.0000000000523", "1e-15"]) {
+      const source = new HttpPriceSource("test", "http://price.invalid", 0, async () =>
+        new Response(JSON.stringify({ EUR: bad }), { status: 200 }),
+      );
+      await assert.rejects(() => quoteFiat(source, 4999n, "EUR", 60), QuoteUnavailable,
+        `a price of ${JSON.stringify(bad)} was accepted`);
+    }
+  });
 });
 
 describe("payments", { skip: !shouldRun }, () => {

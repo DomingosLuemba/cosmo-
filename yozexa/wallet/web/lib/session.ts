@@ -37,9 +37,11 @@ export function unlock(key: PrivateKey): void {
 
 export function lock(): void {
   if (unlockedKey) {
-    // Best effort: zero the scalar we handed out so it does not linger in a
-    // buffer the garbage collector has not reached.
-    unlockedKey.toBytes().fill(0);
+    // Erase the scalar itself, in place. `toBytes()` returns a copy, so
+    // zeroing that would leave the real key in memory until the garbage
+    // collector happened to reach it — recoverable from a heap snapshot, which
+    // is exactly what the idle lock exists to prevent.
+    unlockedKey.destroy();
   }
   unlockedKey = null;
   unlockedAddress = null;

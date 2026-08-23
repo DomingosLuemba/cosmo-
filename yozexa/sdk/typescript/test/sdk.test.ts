@@ -215,3 +215,26 @@ test("a signed transaction hashes stably and binds every field", () => {
   assert.ok(encoded.startsWith('{"auth":'), encoded.slice(0, 40));
   assert.equal(encoded.includes(" "), false);
 });
+
+// A wallet's lock has to erase the key, not forget it: anything still in a
+// buffer is recoverable from a heap snapshot, which is precisely the threat an
+// idle lock exists to answer.
+test("destroy() erases the scalar in place, and toBytes() returns a copy", () => {
+  const key = PrivateKey.generate();
+  assert.ok(key.toBytes().some((b) => b !== 0), "a fresh key should not be all zeros");
+
+  // Zeroing what toBytes() hands back must NOT reach the key — callers get a
+  // copy on purpose, so nobody erases a live key by inspecting it.
+  key.toBytes().fill(0);
+  assert.ok(key.toBytes().some((b) => b !== 0), "toBytes() returned the internal buffer");
+
+  key.destroy();
+  assert.ok(key.toBytes().every((b) => b === 0), "the scalar survived destroy()");
+  assert.equal(key.destroyed, true);
+});
+
+test("a destroyed key refuses to sign rather than signing with zeros", () => {
+  const key = PrivateKey.generate();
+  key.destroy();
+  assert.throws(() => key.sign(new Uint8Array(32)), /destroyed/);
+});
