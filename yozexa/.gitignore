@@ -1,0 +1,24 @@
+# Build output
+build/
+dist/
+*.test
+node_modules/
+.next/
+out/
+
+# Local network data
+.localnet/
+*.db/
+data/
+
+# Secrets — never commit key material of any kind
+*.pem
+*.key
+priv_validator_key.json
+node_key.json
+.env
+.env.*
+!.env.example
+.faucet-test/
+.faucet-test/
+dist-test/

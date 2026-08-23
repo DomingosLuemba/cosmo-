@@ -1,0 +1,240 @@
+# Prometheus alerting rules for a YOZEXA node.
+#
+# Scrape http://<node>:<api-port>/metrics. Load this file with:
+#
+#   rule_files:
+#     - /etc/prometheus/yozexa-alerts.yml
+#
+# The severities mean what they say. `critical` is "wake someone now": the
+# chain's own accounting is wrong, or the network has stopped. `warning` is
+# "look at this today". Nothing here fires on a metric that is merely
+# unusual — an alert that cries wolf is worse than no alert, because it
+# teaches the operator to ignore the one that matters.
+
+groups:
+  - name: yozexa-money
+    interval: 15s
+    rules:
+      # The single most important alert in this file. Every invariant is
+      # checked by the node against its own live state; one of them failing
+      # means the chain no longer adds up, and every figure it reports —
+      # balances included — is suspect until someone works out why.
+      - alert: YozexaInvariantBroken
+        expr: yozexa_invariant_ok == 0
+        for: 0s
+        labels:
+          severity: critical
+        annotations:
+          summary: 'Protocol invariant "{{ $labels.invariant }}" is broken on {{ $labels.instance }}'
+          description: >-
+            The node's own accounting no longer holds. Do not treat any balance
+            or supply figure from this node as correct. Capture /v1/invariants
+            and /v1/supply/verify before restarting anything — a restart may
+            hide the state that explains it.
+
+      - alert: YozexaConservationBroken
+        expr: yozexa_supply_conservation_ok == 0
+        for: 0s
+        labels:
+          severity: critical
+        annotations:
+          summary: "Balances no longer sum to circulating supply on {{ $labels.instance }}"
+          description: >-
+            Tokens exist that nothing accounts for, or are missing from an
+            account that should hold them. This is the condition the supply cap
+            exists to make impossible.
+
+      - alert: YozexaSupplyNearCap
+        expr: yozexa_supply_remaining_mintable_yzxa < 1000
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Under 1,000 YZXA remain mintable"
+          description: >-
+            Expected only at the very end of the emission schedule, decades
+            out. Arriving early means something is minting that should not be.
+
+      - alert: YozexaEmissionOverReserve
+        expr: yozexa_emission_emitted_yzxa > yozexa_emission_reserve_yzxa
+        for: 0s
+        labels:
+          severity: critical
+        annotations:
+          summary: "Emission has paid out more than its reserve"
+          description: >-
+            The block reward schedule is bounded by two independent ceilings.
+            Passing the reserve means both failed.
+
+  - name: yozexa-liveness
+    interval: 15s
+    rules:
+      # A halted chain looks identical to a quiet one in every other metric,
+      # so this is measured as "the height has not moved", not as "no traffic".
+      - alert: YozexaChainHalted
+        expr: increase(yozexa_block_height[3m]) == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "No new blocks on {{ $labels.instance }} for three minutes"
+          description: >-
+            Either this node has lost the network, or the network has lost
+            quorum. Check yozexa_peers on this node and the height on the
+            others before assuming which.
+
+      - alert: YozexaNodeIsolated
+        expr: yozexa_peers == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.instance }} has no peers"
+          description: >-
+            An isolated node answers every other endpoint exactly as a healthy
+            one does; it simply stops advancing. Anything reading from it is
+            reading a stale chain.
+
+      - alert: YozexaFewPeers
+        expr: yozexa_peers < 2
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.instance }} is down to {{ $value }} peer(s)"
+
+      - alert: YozexaCatchingUpTooLong
+        expr: yozexa_catching_up == 1
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.instance }} has been syncing for half an hour"
+          description: >-
+            Normal after a restart or for a new node. Sustained, it means the
+            node cannot keep pace with the chain.
+
+  - name: yozexa-validators
+    interval: 30s
+    rules:
+      # Tombstoning is permanent and only happens for double signing. It is
+      # never routine, and it is never reversed.
+      - alert: YozexaValidatorTombstoned
+        expr: increase(yozexa_validators_tombstoned[1h]) > 0
+        for: 0s
+        labels:
+          severity: critical
+        annotations:
+          summary: "A validator was permanently removed for double signing"
+          description: >-
+            Someone ran the same consensus key in two places, or a key was
+            stolen. Both need a person, immediately.
+
+      - alert: YozexaValidatorsJailed
+        expr: yozexa_validators_jailed > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $value }} validator(s) jailed for downtime"
+
+      # Losing a third of the set is one more failure away from a halt.
+      - alert: YozexaValidatorSetShrinking
+        expr: >-
+          yozexa_validators_active
+            < 0.67 * max_over_time(yozexa_validators_active[24h])
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "The active validator set has lost a third of its members in a day"
+          description: >-
+            Consensus needs more than two thirds. This is close to the point
+            where the chain stops.
+
+  - name: yozexa-build
+    interval: 5m
+    rules:
+      - alert: YozexaMixedVersions
+        expr: count(count by (version) (yozexa_node_info)) > 1
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Nodes are running more than one build"
+          description: >-
+            Expected briefly during a rollout. Sustained, it risks a consensus
+            split if the builds disagree about state.
+
+      - alert: YozexaWrongChain
+        expr: count(count by (chain_id) (yozexa_node_info)) > 1
+        for: 0s
+        labels:
+          severity: critical
+        annotations:
+          summary: "Nodes report different chain ids"
+          description: >-
+            Something is pointed at the wrong network. A wallet reading from it
+            would show balances from a chain that is not the one it thinks.
+
+  # --- YOZEXA Pay ------------------------------------------------------
+  #
+  # Pay sits between a merchant and the chain, and its failures are quiet:
+  # payments that never settle, webhooks that pile up undelivered. Nobody
+  # gets an error. The merchant simply stops being paid, and finds out from
+  # a customer.
+  - name: yozexa-pay
+    interval: 30s
+    rules:
+      - alert: YozexaPayDatabaseDown
+        expr: yozexa_pay_database_up == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Pay cannot reach its database"
+          description: >-
+            Nothing settles, no payment can be created, and every merchant
+            integration is failing right now.
+
+      - alert: YozexaPayNodeUnreachable
+        expr: yozexa_pay_node_up == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Pay cannot reach the YOZEXA node"
+          description: >-
+            Settlement watches the chain. While this holds, customers can pay
+            on-chain and never be credited — the money arrives, the order does
+            not complete.
+
+      - alert: YozexaPaySettlementStalled
+        expr: increase(yozexa_pay_node_height[5m]) == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "The chain height Pay sees has not moved in five minutes"
+          description: >-
+            Either the chain has halted or Pay is reading a stale node. Check
+            yozexa_block_height on the validators before assuming which.
+
+      - alert: YozexaPayWebhooksExhausted
+        expr: increase(yozexa_pay_webhooks_exhausted[1h]) > 0
+        for: 0s
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $value }} webhook(s) gave up after every retry"
+          description: >-
+            Each one is a merchant who was never told about a payment that
+            did happen. Their records and the chain now disagree.
+
+      - alert: YozexaPayWebhookBacklog
+        expr: yozexa_pay_webhooks_oldest_pending_seconds > 900
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "A webhook has been undelivered for over fifteen minutes"

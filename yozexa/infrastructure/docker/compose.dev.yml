@@ -1,0 +1,67 @@
+# YOZEXA development stack.
+#
+# Development only. It uses fixed credentials, publishes nothing beyond
+# localhost, and would be unsafe as a production deployment — which is why the
+# passwords here are obviously placeholders rather than plausible ones.
+#
+#   docker compose -f infrastructure/docker/compose.dev.yml up
+
+name: yozexa-dev
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: yozexa
+      POSTGRES_PASSWORD: development-only-not-a-secret
+      POSTGRES_DB: yozexa_pay
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U yozexa -d yozexa_pay"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  node:
+    build:
+      context: ../..
+      dockerfile: infrastructure/docker/Dockerfile.node
+    ports:
+      - "127.0.0.1:1717:1717"
+      - "127.0.0.1:26657:26657"
+    volumes:
+      - node-home:/home/nonroot/.yozexa
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/yozexa", "query", "status", "--node", "127.0.0.1:1717"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  pay:
+    build:
+      context: ../..
+      dockerfile: infrastructure/docker/Dockerfile.pay
+    environment:
+      DATABASE_URL: postgres://yozexa:development-only-not-a-secret@postgres:5432/yozexa_pay
+      YOZEXA_NODE: http://node:1717
+      YOZEXA_ENVIRONMENT: test
+      PAY_HOST: 0.0.0.0
+      PAY_PORT: "8080"
+      # Generate with: openssl rand -base64 32
+      # In production this comes from a secret manager, never from a compose file.
+      WEBHOOK_SIGNING_KEY: ${WEBHOOK_SIGNING_KEY:?set WEBHOOK_SIGNING_KEY before starting}
+    ports:
+      - "127.0.0.1:8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      node:
+        condition: service_started
+
+volumes:
+  postgres-data:
+  node-home:

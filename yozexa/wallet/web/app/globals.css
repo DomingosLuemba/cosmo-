@@ -1,0 +1,392 @@
+/*
+ * YOZEXA design tokens.
+ *
+ * This file is the ONLY place in the wallet where a colour, a size, a radius,
+ * a duration or a shadow is written as a literal value. Everything else refers
+ * to a token. Changing the brand means editing this file and nothing else.
+ *
+ * Themes: dark is primary, light follows the system. Both are defined here in
+ * full rather than one being derived from the other, because a derived light
+ * theme is how contrast quietly breaks.
+ */
+
+/* ══════════════════════════════════════════════════════════════════════
+   COLOR TOKENS — dark (primary)
+   ══════════════════════════════════════════════════════════════════════ */
+:root {
+  /* Brand. Deep violet into a soft electric blue. */
+  --yzx-brand: #6b4eff;
+  --yzx-brand-strong: #5638e8;
+  --yzx-brand-soft: #8b74ff;
+  --yzx-brand-blue: #4da6ff;
+  --yzx-brand-ink: #ffffff;
+  --yzx-brand-wash: rgba(107, 78, 255, 0.14);
+  --yzx-brand-edge: rgba(107, 78, 255, 0.34);
+  --yzx-brand-gradient: linear-gradient(135deg, #6b4eff 0%, #4da6ff 100%);
+  --yzx-brand-gradient-soft: linear-gradient(140deg, rgba(107, 78, 255, 0.22), rgba(77, 166, 255, 0.10));
+
+  /* Surfaces, from the page backwards. */
+  --yzx-bg: #07080d;
+  --yzx-surface: #0f1117;
+  --yzx-surface-raised: #171a22;
+  --yzx-surface-sunken: #0a0c11;
+  --yzx-surface-overlay: rgba(7, 8, 13, 0.82);
+
+  /* Lines. */
+  --yzx-border: #22262f;
+  --yzx-border-strong: #2f3541;
+  --yzx-border-focus: var(--yzx-brand-soft);
+
+  /* Text. Three levels, no more — a fourth is always someone guessing. */
+  --yzx-text: #f2f4f8;
+  --yzx-text-secondary: #9aa3b2;
+  --yzx-text-tertiary: #646e7e;
+  --yzx-text-inverse: #07080d;
+
+  /* Semantic. Never the only signal for a state — see the a11y rules below. */
+  --yzx-positive: #2ed47a;
+  --yzx-positive-wash: rgba(46, 212, 122, 0.14);
+  --yzx-negative: #ff6b6b;
+  --yzx-negative-wash: rgba(255, 107, 107, 0.14);
+  --yzx-warning: #ffb020;
+  --yzx-warning-wash: rgba(255, 176, 32, 0.14);
+  --yzx-neutral-wash: rgba(154, 163, 178, 0.12);
+
+  /* Fixed by function, not by theme. These four deliberately do NOT change
+     between light and dark, and they are not redefined below.
+
+     A QR code has to be dark-on-light with real contrast or cameras fail to
+     read it, so it keeps its own field regardless of the surrounding theme —
+     a code that does not scan is not a feature. Avatar initials sit on a
+     generated saturated gradient at a fixed lightness, so they need a fixed
+     ink too. They live here rather than in the components so that "all
+     colours are in one file" stays literally true. */
+  --yzx-scan-ink: #000000;
+  --yzx-scan-field: #ffffff;
+  --yzx-scan-placeholder: #f1f1f1;
+  --yzx-on-vivid: #ffffff;
+
+  /* ════════════════════════════════════════════════════════════════════
+     TYPOGRAPHY TOKENS
+     ════════════════════════════════════════════════════════════════════ */
+  /* System fonts on purpose: they are already on the device, already
+     hinted for it, and already what the user's accessibility settings
+     apply to. */
+  --yzx-font-sans:
+    -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display",
+    "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --yzx-font-mono:
+    ui-monospace, "SF Mono", "SFMono-Regular", "JetBrains Mono", Menlo,
+    Consolas, monospace;
+
+  --yzx-text-2xs: 0.6875rem; /* 11 */
+  --yzx-text-xs: 0.75rem;    /* 12 */
+  --yzx-text-sm: 0.8125rem;  /* 13 */
+  --yzx-text-base: 0.9375rem;/* 15 */
+  --yzx-text-md: 1rem;       /* 16 */
+  --yzx-text-lg: 1.125rem;   /* 18 */
+  --yzx-text-xl: 1.375rem;   /* 22 */
+  --yzx-text-2xl: 1.75rem;   /* 28 */
+  --yzx-text-3xl: 2.25rem;   /* 36 */
+  --yzx-text-4xl: 2.75rem;   /* 44 */
+
+  --yzx-weight-regular: 400;
+  --yzx-weight-medium: 500;
+  --yzx-weight-semibold: 600;
+  --yzx-weight-bold: 700;
+
+  --yzx-leading-tight: 1.15;
+  --yzx-leading-snug: 1.35;
+  --yzx-leading-normal: 1.5;
+  --yzx-leading-relaxed: 1.65;
+
+  --yzx-tracking-tight: -0.022em;
+  --yzx-tracking-normal: 0;
+  --yzx-tracking-wide: 0.06em;
+
+  /* ════════════════════════════════════════════════════════════════════
+     SPACING TOKENS — a 4px grid
+     ════════════════════════════════════════════════════════════════════ */
+  --yzx-space-1: 0.25rem;
+  --yzx-space-2: 0.5rem;
+  --yzx-space-3: 0.75rem;
+  --yzx-space-4: 1rem;
+  --yzx-space-5: 1.25rem;
+  --yzx-space-6: 1.5rem;
+  --yzx-space-8: 2rem;
+  --yzx-space-10: 2.5rem;
+  --yzx-space-12: 3rem;
+  --yzx-space-16: 4rem;
+
+  /* ════════════════════════════════════════════════════════════════════
+     RADIUS TOKENS
+     ════════════════════════════════════════════════════════════════════ */
+  --yzx-radius-sm: 8px;
+  --yzx-radius-md: 12px;
+  --yzx-radius-lg: 16px;
+  --yzx-radius-xl: 20px;
+  --yzx-radius-2xl: 28px;
+  --yzx-radius-full: 999px;
+
+  /* ════════════════════════════════════════════════════════════════════
+     SHADOW TOKENS
+     ════════════════════════════════════════════════════════════════════ */
+  --yzx-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --yzx-shadow-md: 0 4px 16px rgba(0, 0, 0, 0.45);
+  --yzx-shadow-lg: 0 12px 40px rgba(0, 0, 0, 0.55);
+  --yzx-shadow-brand: 0 8px 28px rgba(107, 78, 255, 0.32);
+  --yzx-shadow-inset: inset 0 1px 0 rgba(255, 255, 255, 0.045);
+
+  /* ════════════════════════════════════════════════════════════════════
+     MOTION TOKENS
+     Money has to feel steady. Transitions are short and never bouncy.
+     ════════════════════════════════════════════════════════════════════ */
+  --yzx-duration-instant: 120ms;
+  --yzx-duration-fast: 200ms;
+  --yzx-duration-normal: 280ms;
+  --yzx-duration-slow: 350ms;
+  --yzx-ease: cubic-bezier(0.32, 0.72, 0, 1);
+  --yzx-ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+
+  /* Layout */
+  --yzx-app-width: 448px;
+  --yzx-tabbar-height: 62px;
+  --yzx-touch-target: 44px;
+
+  color-scheme: dark;
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+   COLOR TOKENS — light
+   ══════════════════════════════════════════════════════════════════════ */
+@media (prefers-color-scheme: light) {
+  :root {
+    --yzx-brand: #5a3ce6;
+    --yzx-brand-strong: #4527cc;
+    --yzx-brand-soft: #7a5fff;
+    --yzx-brand-blue: #1a7fd4;
+    --yzx-brand-wash: rgba(90, 60, 230, 0.09);
+    --yzx-brand-edge: rgba(90, 60, 230, 0.24);
+    --yzx-brand-gradient: linear-gradient(135deg, #5a3ce6 0%, #2e8fe0 100%);
+    --yzx-brand-gradient-soft: linear-gradient(140deg, rgba(90, 60, 230, 0.12), rgba(46, 143, 224, 0.06));
+
+    --yzx-bg: #f7f8fa;
+    --yzx-surface: #ffffff;
+    --yzx-surface-raised: #ffffff;
+    --yzx-surface-sunken: #eef1f5;
+    --yzx-surface-overlay: rgba(247, 248, 250, 0.86);
+
+    --yzx-border: #e3e7ec;
+    --yzx-border-strong: #ccd3dc;
+
+    --yzx-text: #0b0e14;
+    --yzx-text-secondary: #5a6472;
+    --yzx-text-tertiary: #8a93a1;
+    --yzx-text-inverse: #ffffff;
+
+    /* Darkened so they still pass contrast on white. */
+    --yzx-positive: #0e8f4f;
+    --yzx-positive-wash: rgba(14, 143, 79, 0.10);
+    --yzx-negative: #c62828;
+    --yzx-negative-wash: rgba(198, 40, 40, 0.09);
+    --yzx-warning: #9a6200;
+    --yzx-warning-wash: rgba(154, 98, 0, 0.10);
+    --yzx-neutral-wash: rgba(90, 100, 114, 0.08);
+
+    --yzx-shadow-sm: 0 1px 2px rgba(11, 14, 20, 0.06);
+    --yzx-shadow-md: 0 4px 16px rgba(11, 14, 20, 0.08);
+    --yzx-shadow-lg: 0 12px 40px rgba(11, 14, 20, 0.12);
+    --yzx-shadow-brand: 0 8px 24px rgba(90, 60, 230, 0.22);
+    --yzx-shadow-inset: inset 0 1px 0 rgba(255, 255, 255, 0.7);
+
+    color-scheme: light;
+  }
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+   ACCESSIBILITY
+   ══════════════════════════════════════════════════════════════════════ */
+
+/* Respect a stated preference for less motion. Nothing in this wallet is
+   conveyed by animation alone, so removing it costs no information. */
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --yzx-duration-instant: 1ms;
+    --yzx-duration-fast: 1ms;
+    --yzx-duration-normal: 1ms;
+    --yzx-duration-slow: 1ms;
+  }
+  *,
+  *::before,
+  *::after {
+    animation-duration: 1ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 1ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* Raise separation and remove decorative translucency when asked. */
+@media (prefers-contrast: more) {
+  :root {
+    --yzx-border: var(--yzx-border-strong);
+    --yzx-text-secondary: var(--yzx-text);
+    --yzx-text-tertiary: var(--yzx-text-secondary);
+  }
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+   BASE
+   ══════════════════════════════════════════════════════════════════════ */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  /* No fixed font-size: the root stays at the browser's, so Dynamic Type
+     and a user's own text-size setting scale the whole interface. */
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--yzx-bg);
+  color: var(--yzx-text);
+  font-family: var(--yzx-font-sans);
+  font-size: var(--yzx-text-base);
+  line-height: var(--yzx-leading-normal);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  /* Financial figures line up as they change. */
+  font-variant-numeric: tabular-nums;
+  overscroll-behavior-y: none;
+}
+
+/* A visible focus ring, always. Removing it to "look cleaner" makes the
+   wallet unusable by keyboard. */
+:focus-visible {
+  outline: 2px solid var(--yzx-border-focus);
+  outline-offset: 2px;
+  border-radius: var(--yzx-radius-sm);
+}
+:focus:not(:focus-visible) {
+  outline: none;
+}
+
+a {
+  color: var(--yzx-brand-soft);
+  text-decoration: none;
+}
+a:hover {
+  text-decoration: underline;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+}
+
+/* Only for content read by screen readers. */
+.yzx-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* Skip link, for keyboard users. */
+.yzx-skip {
+  position: absolute;
+  left: var(--yzx-space-4);
+  top: calc(var(--yzx-space-4) * -4);
+  z-index: 100;
+  padding: var(--yzx-space-3) var(--yzx-space-4);
+  background: var(--yzx-surface-raised);
+  border: 1px solid var(--yzx-border);
+  border-radius: var(--yzx-radius-md);
+  transition: top var(--yzx-duration-fast) var(--yzx-ease);
+}
+.yzx-skip:focus {
+  top: var(--yzx-space-4);
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+   APP SHELL
+   ══════════════════════════════════════════════════════════════════════ */
+.yzx-app {
+  max-width: var(--yzx-app-width);
+  margin: 0 auto;
+  min-height: 100dvh;
+  padding: 0 var(--yzx-space-5)
+    calc(var(--yzx-tabbar-height) + env(safe-area-inset-bottom) + var(--yzx-space-8));
+  position: relative;
+}
+
+.yzx-app--flush {
+  padding-bottom: calc(env(safe-area-inset-bottom) + var(--yzx-space-8));
+}
+
+/* Numbers that must not reflow as they update. */
+.yzx-num {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1;
+}
+
+.yzx-mono {
+  font-family: var(--yzx-font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+   ENTRANCE — used sparingly, and disabled under reduced motion
+   ══════════════════════════════════════════════════════════════════════ */
+@keyframes yzx-rise {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 10px, 0);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes yzx-fade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes yzx-mark-in {
+  0% { opacity: 0; transform: scale(0.86); }
+  60% { opacity: 1; }
+  100% { opacity: 1; transform: scale(1); }
+}
+
+@keyframes yzx-shimmer {
+  from { background-position: -320px 0; }
+  to { background-position: 320px 0; }
+}
+
+@keyframes yzx-check {
+  from { stroke-dashoffset: 48; }
+  to { stroke-dashoffset: 0; }
+}
+
+@keyframes yzx-ring {
+  from { transform: scale(0.7); opacity: 0.55; }
+  to { transform: scale(1.5); opacity: 0; }
+}
+
+.yzx-rise {
+  animation: yzx-rise var(--yzx-duration-normal) var(--yzx-ease-out) both;
+}
+.yzx-fade {
+  animation: yzx-fade var(--yzx-duration-normal) var(--yzx-ease) both;
+}

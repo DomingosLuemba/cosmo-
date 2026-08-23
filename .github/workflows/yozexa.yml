@@ -1,0 +1,243 @@
+# YOZEXA continuous integration.
+#
+# Every pull request that touches the chain runs the checks that would catch a
+# monetary bug: unit tests, adversarial tests, the randomised invariant sweep,
+# and a fuzzing pass over the parsers and the state machine.
+#
+# The fuzzing here is deliberately short — it is a smoke test, not a campaign.
+# The scheduled job below is the campaign.
+
+name: YOZEXA
+
+on:
+  push:
+    branches: ["**"]
+    paths: ["yozexa/**", ".github/workflows/yozexa.yml"]
+  pull_request:
+    paths: ["yozexa/**", ".github/workflows/yozexa.yml"]
+  schedule:
+    # A longer fuzzing campaign, nightly.
+    - cron: "0 3 * * *"
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    working-directory: yozexa
+
+jobs:
+  chain:
+    name: Chain
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache-dependency-path: yozexa/chain/go.sum
+
+      - name: Formatting
+        working-directory: yozexa/chain
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "These files are not gofmt'd:"; echo "$unformatted"; exit 1
+          fi
+
+      - name: Vet
+        working-directory: yozexa/chain
+        run: go vet ./...
+
+      - name: Tests
+        working-directory: yozexa/chain
+        run: go test ./... -count=1
+
+      - name: Tests under the race detector
+        working-directory: yozexa/chain
+        run: go test ./... -race -count=1
+
+      - name: Build binaries
+        working-directory: yozexa/chain
+        run: make build
+
+  fuzz:
+    name: Fuzz
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache-dependency-path: yozexa/chain/go.sum
+
+      # Longer on the nightly schedule than on a pull request.
+      - name: Set fuzz duration
+        id: duration
+        run: |
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            echo "seconds=600" >> "$GITHUB_OUTPUT"
+          else
+            echo "seconds=30" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Fuzz the transaction parser
+        working-directory: yozexa/chain
+        run: go test ./tx/... -run=Fuzz -fuzz=FuzzDecodeTx -fuzztime=${{ steps.duration.outputs.seconds }}s
+
+      - name: Fuzz amount parsing
+        working-directory: yozexa/chain
+        run: go test ./tx/... -run=Fuzz -fuzz=FuzzParseAmount -fuzztime=${{ steps.duration.outputs.seconds }}s
+
+      - name: Fuzz canonical encoding
+        working-directory: yozexa/chain
+        run: go test ./tx/... -run=Fuzz -fuzz=FuzzCanonicalJSON -fuzztime=${{ steps.duration.outputs.seconds }}s
+
+      - name: Fuzz signature verification
+        working-directory: yozexa/chain
+        run: go test ./tx/... -run=Fuzz -fuzz=FuzzSignatureVerification -fuzztime=${{ steps.duration.outputs.seconds }}s
+
+      - name: Fuzz Merkle proofs
+        working-directory: yozexa/chain
+        run: go test ./store/... -run=Fuzz -fuzz=FuzzStoreProof -fuzztime=${{ steps.duration.outputs.seconds }}s
+
+      - name: Fuzz the state machine
+        working-directory: yozexa/chain
+        run: go test ./app/... -run=Fuzz -fuzz=FuzzStateMachine -fuzztime=${{ steps.duration.outputs.seconds }}s
+
+      # A crash found by fuzzing is a reproducible test case. Keep it.
+      - name: Upload any crashers
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crashers
+          path: yozexa/chain/**/testdata/fuzz/**
+
+  invariants:
+    name: Live invariants
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache-dependency-path: yozexa/chain/go.sum
+
+      # Start a real network, put real transactions through it, and assert the
+      # supply audit passes. A unit test can be satisfied by a mock; this
+      # cannot.
+      - name: Start a localnet and audit its supply
+        working-directory: yozexa/chain
+        env:
+          YOZEXA_PASSPHRASE: ci-only-passphrase-not-a-secret
+          YOZEXA_HOME: /tmp/yozexa-ci
+        run: |
+          set -euo pipefail
+          make build
+          ../build/yozexa keys create validator
+          ../build/yozexa keys create alice
+          ../build/yozexad init ci-node --network localnet --with-genesis \
+            --operator-key validator --passphrase "$YOZEXA_PASSPHRASE"
+
+          ../build/yozexad start --api 127.0.0.1:1717 --log-level error &
+          NODE_PID=$!
+          trap 'kill "$NODE_PID" 2>/dev/null || true' EXIT
+
+          for _ in $(seq 1 60); do
+            curl -sf http://127.0.0.1:1717/v1/health >/dev/null && break
+            sleep 1
+          done
+
+          ALICE=$(../build/yozexa keys show alice | awk '/address/{print $2}')
+          ../build/yozexa tx send "$ALICE" 25 --unit YOZ --from validator
+          ../build/yozexa tx stake \
+            "$(../build/yozexa keys show validator | awk '/address/{print $2}')" \
+            1000 --from validator
+
+          ../build/yozexa query invariants
+          ../build/yozexa supply verify
+
+  javascript:
+    name: SDK, Pay and web
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: yozexa
+          POSTGRES_PASSWORD: ci-only-not-a-secret
+          POSTGRES_DB: yozexa_pay
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U yozexa"
+          --health-interval 5s --health-timeout 3s --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: yozexa/package-lock.json
+
+      - name: Install
+        run: npm install --no-audit --no-fund
+
+      - name: Typecheck everything
+        run: npm run typecheck
+
+      - name: Build
+        run: npm run build
+
+      - name: Test
+        env:
+          DATABASE_URL: postgres://yozexa:ci-only-not-a-secret@127.0.0.1:5432/yozexa_pay
+        run: npm test
+
+  security:
+    name: Security checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Key material must never enter the repository. This is a coarse net, and
+      # it is here because the cost of one leaked key is unbounded.
+      - name: Refuse committed key material
+        run: |
+          set -euo pipefail
+          bad=$(git ls-files \
+            | grep -E '(priv_validator_key\.json|node_key\.json|\.pem$|\.p12$|/\.env$)' || true)
+          if [ -n "$bad" ]; then
+            echo "These look like key material and must not be committed:"
+            echo "$bad"; exit 1
+          fi
+
+      - name: Refuse obvious secrets in tracked files
+        run: |
+          set -euo pipefail
+          # A 24-word BIP-39 phrase, or a live API key, in a tracked file.
+          if git grep -nIE '\byzk_live_[A-Za-z0-9_-]{20,}' -- . ':(exclude)yozexa/docs' ':(exclude)*.md'; then
+            echo "A live API key appears to be committed."; exit 1
+          fi
+          if git grep -nIE '(abandon|zoo)( [a-z]+){23}' -- . ':(exclude)*.md'; then
+            echo "What looks like a BIP-39 mnemonic is committed."; exit 1
+          fi
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache-dependency-path: yozexa/chain/go.sum
+
+      - name: Go vulnerability scan
+        working-directory: yozexa/chain
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: npm audit
+        working-directory: yozexa
+        run: npm install --no-audit --no-fund && npm audit --audit-level=high
