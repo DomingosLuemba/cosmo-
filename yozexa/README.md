@@ -112,12 +112,28 @@ cryptography.
 ## Tests
 
 ```bash
-make test    # 98 tests: 48 Go, 50 JavaScript
+make test    # 145 tests: 90 Go, 55 JavaScript
 make fuzz    # a short pass over the parsers, proofs and the state machine
 make check   # what CI runs
 ```
 
 Tests that need PostgreSQL skip themselves when `DATABASE_URL` is unset.
+
+The wallet is a client-rendered app, where an HTTP 200 proves almost nothing,
+so it is verified by driving a real browser against a running devnet:
+
+```bash
+./scripts/devnet.sh up
+npx --yes playwright@1 install chromium
+npm run test:e2e --workspace @yozexa/wallet-web
+```
+
+Thirty checks: create a wallet, have a wrong recovery word refused, lock on
+reload and unlock again, receive YZXA and read the balance back from the node,
+switch units, find the payment in Activity, send through review, then reconcile
+against the chain in base units. It skips rather than fails when the devnet or
+a Chromium is missing, so a checkout without either does not report a red suite
+it never ran.
 
 The suite runs real blocks through the real ABCI interface, and includes
 adversarial tests for supply-cap breaks, grant abuse, double signing,
@@ -143,6 +159,15 @@ On a live single-validator localnet, not in a mock:
 | Merchant flow | link → checkout → on-chain payment → settled in ~1s → balances reconcile against the chain |
 | Webhooks | `payment.created` and `payment.confirmed` delivered signed, and verified by an independent receiver |
 | Faucet | proof-of-work required, 10 YZXA paid on chain, replay refused |
+| Wallet | driven in a browser: created, funded, spent, reconciled against the chain to the base unit |
+
+### Audit
+
+An internal audit is in [AUDIT_2026_08.md](docs/AUDIT_2026_08.md): four findings
+with their fixes, what held under attack, and what this audit does **not**
+cover. An external audit, a public multi-validator testnet and a scan outside a
+restricted network are all still open — they are the first three items in the
+mainnet checklist.
 
 ## What YOZEXA will not do
 

@@ -7,7 +7,8 @@
     "dev": "next dev -p 3002",
     "build": "next build",
     "start": "next start -p 3002",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test:e2e": "node test/wallet.e2e.mjs"
   },
   "dependencies": {
     "@noble/hashes": "^1.7.1",
@@ -22,6 +23,7 @@
     "@types/qrcode": "^1.5.5",
     "@types/react": "^19.0.8",
     "@types/react-dom": "^19.0.3",
+    "playwright": "^1.62.1",
     "typescript": "^5.7.3"
   }
 }

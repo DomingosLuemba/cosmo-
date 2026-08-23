@@ -9,13 +9,14 @@ SHELL := /usr/bin/env bash
 .DEFAULT_GOAL := help
 
 .PHONY: help build test check lint devnet devnet-down devnet-status devnet-reset \
-        chain chain-test fuzz js js-test clean
+        chain chain-test fuzz js js-test test-e2e clean
 
 help:
 	@echo "YOZEXA"
 	@echo
 	@echo "  make build          build the chain binaries and every JavaScript package"
 	@echo "  make test           run every test suite"
+	@echo "  make test-e2e       drive the wallet in a browser against a running devnet"
 	@echo "  make check          formatting, vet, typecheck and tests — what CI runs"
 	@echo "  make fuzz           a short fuzzing pass over the parsers and state machine"
 	@echo "  make devnet         start the whole stack against a local chain"
@@ -41,6 +42,11 @@ chain-test:
 
 js-test:
 	npm test
+
+# The wallet is client-rendered, so it is verified by driving a browser against
+# a running devnet. Skips itself when the devnet or a Chromium is missing.
+test-e2e:
+	npm run test:e2e --workspace @yozexa/wallet-web
 
 fuzz:
 	$(MAKE) -C chain fuzz
