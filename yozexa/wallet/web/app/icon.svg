@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 180 180" width="180" height="180">
+  <!--
+    The YOZEXA app icon.
+
+    A standalone asset: it is served as the favicon and the home-screen icon, so
+    it is rendered by software that never loads the app's stylesheet. That is
+    why the colours are written out here instead of referencing design tokens,
+    and why it does not follow the light/dark setting — an icon that changed
+    colour with the OS would stop being recognisable on a home screen.
+
+    The geometry is the same mark as YzxMark in components/yzx/logo.tsx, scaled
+    from a 48px to a 180px canvas. Change one and change the other.
+    Colours mirror --yzx-bg, --yzx-brand-soft, --yzx-brand and --yzx-brand-blue.
+  -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="180" y2="180" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#121420"/>
+      <stop offset="1" stop-color="#07080d"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.42" r="0.62">
+      <stop stop-color="#6b4eff" stop-opacity="0.42"/>
+      <stop offset="1" stop-color="#6b4eff" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="mark" x1="46" y1="46" x2="134" y2="134" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#a48fff"/>
+      <stop offset="0.55" stop-color="#6b4eff"/>
+      <stop offset="1" stop-color="#4da6ff"/>
+    </linearGradient>
+  </defs>
+  <rect width="180" height="180" rx="40" fill="url(#bg)"/>
+  <rect width="180" height="180" rx="40" fill="url(#glow)"/>
+  <g stroke="url(#mark)" stroke-width="15" stroke-linecap="round" fill="none">
+    <path d="M56 56 L79 79"/>
+    <path d="M124 56 L101 79"/>
+    <path d="M79 101 L56 124"/>
+    <path d="M101 101 L124 124"/>
+  </g>
+</svg>

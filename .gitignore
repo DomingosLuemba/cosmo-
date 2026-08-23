@@ -12,3 +12,10 @@ dist/
 *.xcworkspace/xcuserdata/
 DerivedData/
 *.xcuserstate
+
+# TypeScript incremental build cache. Machine-local, and checking it in makes
+# every build show up as a change.
+*.tsbuildinfo
+
+# Next.js build output
+.next/

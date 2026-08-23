@@ -4,6 +4,10 @@ import { useCallback, useEffect, useState } from "react";
 import { formatYZXA, messages, parseAmount, signTransaction } from "@yozexa/sdk";
 
 import { UnlockGate } from "@/components/unlock-gate";
+import { YzxButton } from "@/components/yzx/button";
+import { YzxCard, YzxSectionHeader } from "@/components/yzx/card";
+import { YzxAlert, YzxAvatar, YzxNavigationBar } from "@/components/yzx/primitives";
+import { humanize, type HumanError } from "@/lib/errors";
 import { client } from "@/lib/node";
 import { currentAddress, withKey } from "@/lib/session";
 
@@ -31,7 +35,7 @@ export default function PermissionsPage() {
 
 function Permissions() {
   const [grants, setGrants] = useState<Grant[]>([]);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<HumanError | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [showForm, setShowForm] = useState(false);
@@ -51,7 +55,7 @@ function Permissions() {
       const { grants: list } = await client().grants(address);
       setGrants((list ?? []) as unknown as Grant[]);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(humanize(err));
     }
   }, []);
 
@@ -91,7 +95,7 @@ function Permissions() {
       setNotice(successMessage);
       await load();
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(humanize(err));
     } finally {
       setBusy(false);
     }
@@ -134,7 +138,7 @@ function Permissions() {
       setApprovalAbove("");
       setRecipients("");
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(humanize(err));
     }
   }
 
@@ -149,176 +153,335 @@ function Permissions() {
 
   return (
     <>
-      <h1>Spending permissions</h1>
-      <p className="subtitle">
-        Let an app, a device or an agent spend a bounded amount on your behalf.
+      <YzxNavigationBar title="Permissions" back="/profile" />
+
+      <h1
+        style={{
+          margin: "0 0 var(--yzx-space-2)",
+          fontSize: "var(--yzx-text-2xl)",
+          letterSpacing: "var(--yzx-tracking-tight)",
+        }}
+      >
+        Spending permissions
+      </h1>
+      <p style={intro}>
+        Let an app, a device or an agent spend a bounded amount on your behalf. Every limit is
+        enforced by the chain, not by the software you are trusting.
       </p>
 
-      {error ? <div className="alert danger">{error}</div> : null}
-      {notice ? <div className="alert ok">{notice}</div> : null}
+      {error ? (
+        <YzxAlert tone="danger" title={error.message}>
+          {error.action}
+        </YzxAlert>
+      ) : null}
+      {notice ? <YzxAlert tone="success" title={notice} /> : null}
 
       {grants.length === 0 ? (
-        <div className="card">
-          <p className="dim" style={{ margin: 0 }}>
-            No permissions issued. Nothing can spend from this account except you.
+        <YzxCard tone="sunken">
+          <p style={{ margin: 0, color: "var(--yzx-text-secondary)", fontSize: "var(--yzx-text-sm)", lineHeight: "var(--yzx-leading-relaxed)" }}>
+            No permissions issued. Nothing can spend from this account except you, holding this
+            key, on this device.
           </p>
-        </div>
+        </YzxCard>
       ) : (
-        <div className="list" style={{ marginBottom: 18 }}>
-          {grants.map((g) => {
-            const total = BigInt(g.total);
-            const spent = BigInt(g.spent_total);
-            const remaining = total - spent;
-            const expired = g.expires_at_unix * 1000 < Date.now();
-            return (
-              <div className="list-item" key={g.grantee} style={{ alignItems: "flex-start" }}>
-                <div style={{ flex: 1 }}>
-                  <div className="title mono" style={{ fontSize: 12 }}>
-                    {g.grantee.slice(0, 16)}…{g.grantee.slice(-6)}
+        <>
+          <YzxSectionHeader title="Issued" />
+          <div style={{ display: "grid", gap: "var(--yzx-space-3)", marginBottom: "var(--yzx-space-5)" }}>
+            {grants.map((g) => {
+              const total = BigInt(g.total);
+              const spent = BigInt(g.spent_total);
+              const remaining = total - spent;
+              const expired = g.expires_at_unix * 1000 < Date.now();
+              const usedPercent = total > 0n ? Number((spent * 100n) / total) : 0;
+              return (
+                <YzxCard key={g.grantee}>
+                  <div style={{ display: "flex", alignItems: "center", gap: "var(--yzx-space-3)" }}>
+                    <YzxAvatar seed={g.grantee} size={38} />
+                    <div style={{ minWidth: 0, flex: 1 }}>
+                      <p className="yzx-mono" style={{ margin: 0, fontSize: "var(--yzx-text-xs)", wordBreak: "break-all" }}>
+                        {g.grantee.slice(0, 16)}…{g.grantee.slice(-6)}
+                      </p>
+                      <p style={{ margin: "2px 0 0", fontSize: "var(--yzx-text-2xs)", color: "var(--yzx-text-tertiary)" }}>
+                        {expired ? "Expired — it can no longer spend" : "Active"}
+                      </p>
+                    </div>
                   </div>
-                  <div className="meta">
-                    {formatYZXA(remaining)} of {formatYZXA(total)} YZXA left
-                    {g.period_seconds > 0
-                      ? ` · up to ${formatYZXA(BigInt(g.per_period))} per ${Math.round(g.period_seconds / 3600)}h`
-                      : ""}
-                  </div>
-                  <div className="meta">
-                    {g.allowed_recipients?.length
-                      ? `only to ${g.allowed_recipients.length} named address${g.allowed_recipients.length === 1 ? "" : "es"}`
-                      : "any recipient"}
-                    {" · "}
-                    {expired ? (
-                      <span style={{ color: "var(--text-dim)" }}>expired</span>
-                    ) : (
-                      `expires ${new Date(g.expires_at_unix * 1000).toISOString().slice(0, 16).replace("T", " ")} UTC`
-                    )}
-                  </div>
-                  <button
-                    className="ghost"
-                    disabled={busy}
-                    style={{ color: "var(--danger)" }}
-                    onClick={() => void revoke(g)}
+
+                  <p style={{ margin: "var(--yzx-space-4) 0 var(--yzx-space-2)", fontSize: "var(--yzx-text-sm)" }}>
+                    <span className="yzx-mono">{formatYZXA(remaining)}</span> of{" "}
+                    <span className="yzx-mono">{formatYZXA(total)}</span> YZXA left
+                  </p>
+                  {/* The bar repeats what the numbers above already say, so a
+                      reader who cannot see it loses nothing. */}
+                  <div
+                    aria-hidden="true"
+                    style={{
+                      height: "5px",
+                      borderRadius: "var(--yzx-radius-full)",
+                      background: "var(--yzx-surface-sunken)",
+                      overflow: "hidden",
+                    }}
                   >
-                    Revoke now
-                  </button>
-                </div>
-              </div>
-            );
-          })}
-        </div>
+                    <div
+                      style={{
+                        width: `${Math.min(100, Math.max(0, usedPercent))}%`,
+                        height: "100%",
+                        background: expired ? "var(--yzx-text-tertiary)" : "var(--yzx-brand)",
+                      }}
+                    />
+                  </div>
+
+                  <dl style={{ margin: "var(--yzx-space-4) 0 0", display: "grid", gap: "var(--yzx-space-2)" }}>
+                    <Fact
+                      label="Rate"
+                      value={
+                        g.period_seconds > 0
+                          ? `Up to ${formatYZXA(BigInt(g.per_period))} YZXA every ${Math.round(g.period_seconds / 3600)}h`
+                          : "No separate rate limit"
+                      }
+                    />
+                    <Fact
+                      label="Recipients"
+                      value={
+                        g.allowed_recipients?.length
+                          ? `Only ${g.allowed_recipients.length} named address${g.allowed_recipients.length === 1 ? "" : "es"}`
+                          : "Any recipient"
+                      }
+                    />
+                    <Fact
+                      label="Expires"
+                      value={
+                        expired
+                          ? "Already expired"
+                          : `${new Date(g.expires_at_unix * 1000).toISOString().slice(0, 16).replace("T", " ")} UTC`
+                      }
+                    />
+                  </dl>
+
+                  <div style={{ marginTop: "var(--yzx-space-4)" }}>
+                    <YzxButton variant="danger" size="md" disabled={busy} onClick={() => void revoke(g)}>
+                      {busy ? "Revoking…" : "Revoke now"}
+                    </YzxButton>
+                  </div>
+                </YzxCard>
+              );
+            })}
+          </div>
+        </>
       )}
 
       {!showForm ? (
-        <button className="primary" onClick={() => setShowForm(true)}>
-          Grant a permission
-        </button>
+        <YzxButton onClick={() => setShowForm(true)}>Grant a permission</YzxButton>
       ) : (
         <form onSubmit={create}>
-          <div className="card">
-            <h2>New permission</h2>
-            <div className="field">
-              <label htmlFor="grantee">Who may spend</label>
+          <YzxSectionHeader title="New permission" />
+          <YzxCard>
+            <Field
+              id="grantee"
+              label="Who may spend"
+              hint="An address or a YOZEXA ID. Check it: this is who gets the budget."
+            >
               <input
                 id="grantee"
-                className="mono"
+                className="yzx-mono"
                 value={grantee}
                 autoCapitalize="none"
+                autoCorrect="off"
                 spellCheck={false}
                 onChange={(e) => setGrantee(e.target.value)}
-                placeholder="yzx1… or an alias"
+                placeholder="yzx1… or maria.yzx"
+                style={input}
               />
-            </div>
-            <div className="field">
-              <label htmlFor="total">Total limit (YZXA)</label>
+            </Field>
+
+            <Field
+              id="total"
+              label="Total limit (YZXA)"
+              hint="Required. There is no unlimited option on this network — the protocol cannot express one."
+            >
               <input
                 id="total"
                 inputMode="decimal"
                 value={total}
                 onChange={(e) => setTotal(e.target.value)}
                 placeholder="20"
+                style={input}
               />
-              <div className="hint">Required. There is no unlimited option on this network.</div>
-            </div>
-            <div className="field">
-              <label htmlFor="perPeriod">Limit per period (optional)</label>
-              <div style={{ display: "flex", gap: 8 }}>
+            </Field>
+
+            <Field
+              id="perPeriod"
+              label="Limit per period (optional)"
+              hint="An amount, and how many hours the window covers. Caps how fast the budget can be drained."
+            >
+              <div style={{ display: "flex", gap: "var(--yzx-space-2)" }}>
                 <input
                   id="perPeriod"
                   inputMode="decimal"
                   value={perPeriod}
                   onChange={(e) => setPerPeriod(e.target.value)}
                   placeholder="5"
+                  style={{ ...input, flex: 1 }}
                 />
                 <input
                   inputMode="numeric"
                   value={periodHours}
                   onChange={(e) => setPeriodHours(e.target.value)}
-                  style={{ width: 110 }}
+                  style={{ ...input, width: "104px" }}
                   aria-label="Period in hours"
                 />
               </div>
-              <div className="hint">Amount, and the number of hours the window covers.</div>
-            </div>
-            <div className="field">
-              <label htmlFor="approval">Ask me above (optional)</label>
+            </Field>
+
+            <Field
+              id="approval"
+              label="Ask me above (optional)"
+              hint="Single payments above this are refused by the chain and need your own signature."
+            >
               <input
                 id="approval"
                 inputMode="decimal"
                 value={approvalAbove}
                 onChange={(e) => setApprovalAbove(e.target.value)}
                 placeholder="2"
+                style={input}
               />
-              <div className="hint">
-                Single payments above this are refused by the chain and need your signature.
-              </div>
-            </div>
-            <div className="field">
-              <label htmlFor="recipients">Only these recipients (optional)</label>
+            </Field>
+
+            <Field
+              id="recipients"
+              label="Only these recipients (optional)"
+              hint="Leave blank to allow any recipient. Naming them is stronger — the chain refuses everything else."
+            >
               <textarea
                 id="recipients"
-                className="mono"
+                className="yzx-mono"
                 rows={2}
                 value={recipients}
                 onChange={(e) => setRecipients(e.target.value)}
                 placeholder="yzx1… yzx1…"
+                style={{ ...input, resize: "vertical" }}
               />
-              <div className="hint">
-                Leave blank to allow any recipient. Naming them is stronger.
-              </div>
-            </div>
-            <div className="field">
-              <label htmlFor="expiry">Expires in (hours)</label>
+            </Field>
+
+            <Field id="expiry" label="Expires in (hours)" hint="Required, and at most one year.">
               <input
                 id="expiry"
                 inputMode="numeric"
                 value={expiryHours}
                 onChange={(e) => setExpiryHours(e.target.value)}
+                style={input}
               />
-              <div className="hint">Required, and at most one year.</div>
+            </Field>
+
+            <div style={{ display: "grid", gap: "var(--yzx-space-3)", marginTop: "var(--yzx-space-5)" }}>
+              <YzxButton type="submit" busy={busy} disabled={busy || !grantee || !total}>
+                {busy ? "Granting…" : "Grant permission"}
+              </YzxButton>
+              <YzxButton variant="ghost" type="button" onClick={() => setShowForm(false)}>
+                Cancel
+              </YzxButton>
             </div>
-            <button className="primary" type="submit" disabled={busy || !grantee || !total}>
-              {busy ? "Granting…" : "Grant permission"}
-            </button>
-            <button className="secondary" type="button" onClick={() => setShowForm(false)}>
-              Cancel
-            </button>
-          </div>
+          </YzxCard>
         </form>
       )}
 
-      <div className="card" style={{ marginTop: 18 }}>
-        <h2>What a permission can and cannot do</h2>
-        <p className="dim" style={{ fontSize: 13 }}>
+      <YzxSectionHeader title="What a permission can and cannot do" />
+      <YzxCard tone="sunken">
+        <p style={note}>
           The chain enforces every limit, so the holder cannot exceed the total, the rate, the
-          recipient list or the expiry — whatever software it runs. It can never vote with your
-          stake, create a validator, give away your YOZEXA ID, or issue permissions of its own.
+          recipient list or the expiry — whatever software it runs, and however it is compromised.
         </p>
-        <p className="dim" style={{ fontSize: 13, marginBottom: 0 }}>
-          This is how subscriptions, device session keys and AI agent wallets work here: the agent
+        <p style={note}>
+          It can never vote with your stake, create a validator, give away your YOZEXA ID, or issue
+          permissions of its own.
+        </p>
+        <p style={{ ...note, marginBottom: 0 }}>
+          This is how subscriptions, device session keys and agent wallets work here: the agent
           holds a key that is structurally incapable of draining your account, and never holds your
           main key.
         </p>
-      </div>
+      </YzxCard>
     </>
   );
 }
+
+/** One labelled fact inside a grant card. */
+function Fact({ label, value }: { label: string; value: string }) {
+  return (
+    <div style={{ display: "flex", justifyContent: "space-between", gap: "var(--yzx-space-4)" }}>
+      <dt style={{ fontSize: "var(--yzx-text-xs)", color: "var(--yzx-text-tertiary)", flexShrink: 0 }}>
+        {label}
+      </dt>
+      <dd style={{ margin: 0, fontSize: "var(--yzx-text-xs)", color: "var(--yzx-text-secondary)", textAlign: "right" }}>
+        {value}
+      </dd>
+    </div>
+  );
+}
+
+/** A labelled form field with its explanation attached, not floating nearby. */
+function Field({
+  id,
+  label,
+  hint,
+  children,
+}: {
+  id: string;
+  label: string;
+  hint: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div style={{ marginBottom: "var(--yzx-space-5)" }}>
+      <label htmlFor={id} style={labelStyle}>
+        {label}
+      </label>
+      {children}
+      <p
+        style={{
+          margin: "var(--yzx-space-2) 0 0",
+          fontSize: "var(--yzx-text-2xs)",
+          color: "var(--yzx-text-tertiary)",
+          lineHeight: "var(--yzx-leading-relaxed)",
+        }}
+      >
+        {hint}
+      </p>
+    </div>
+  );
+}
+
+const intro: React.CSSProperties = {
+  margin: "0 0 var(--yzx-space-5)",
+  color: "var(--yzx-text-secondary)",
+  fontSize: "var(--yzx-text-base)",
+  lineHeight: "var(--yzx-leading-relaxed)",
+};
+
+const note: React.CSSProperties = {
+  margin: "0 0 var(--yzx-space-3)",
+  fontSize: "var(--yzx-text-sm)",
+  color: "var(--yzx-text-secondary)",
+  lineHeight: "var(--yzx-leading-relaxed)",
+};
+
+const labelStyle: React.CSSProperties = {
+  display: "block",
+  fontSize: "var(--yzx-text-xs)",
+  fontWeight: "var(--yzx-weight-semibold)",
+  letterSpacing: "var(--yzx-tracking-wide)",
+  textTransform: "uppercase",
+  color: "var(--yzx-text-tertiary)",
+  marginBottom: "var(--yzx-space-2)",
+};
+
+const input: React.CSSProperties = {
+  width: "100%",
+  padding: "var(--yzx-space-4)",
+  background: "var(--yzx-surface)",
+  border: "1px solid var(--yzx-border)",
+  borderRadius: "var(--yzx-radius-lg)",
+  color: "var(--yzx-text)",
+  fontSize: "var(--yzx-text-base)",
+};

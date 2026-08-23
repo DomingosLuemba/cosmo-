@@ -1,9 +1,15 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { formatYZXA, messages, parseAmount, signTransaction } from "@yozexa/sdk";
+import { formatYZXA, messages, signTransaction } from "@yozexa/sdk";
 
 import { UnlockGate } from "@/components/unlock-gate";
+import { YzxAmountInput } from "@/components/yzx/amount-input";
+import { YzxButton } from "@/components/yzx/button";
+import { YzxCard, YzxSectionHeader } from "@/components/yzx/card";
+import { YzxAlert, YzxAvatar, YzxNavigationBar, YzxSkeleton } from "@/components/yzx/primitives";
+import { entryUnit } from "@/lib/display";
+import { humanize, type HumanError } from "@/lib/errors";
 import { client } from "@/lib/node";
 import { currentAddress, withKey } from "@/lib/session";
 
@@ -27,12 +33,15 @@ export default function StakePage() {
 }
 
 function Stake() {
-  const [validators, setValidators] = useState<ValidatorRow[]>([]);
+  const [validators, setValidators] = useState<ValidatorRow[] | null>(null);
   const [positions, setPositions] = useState<Array<Record<string, unknown>>>([]);
-  const [selected, setSelected] = useState<string | null>(null);
+  const [pending, setPending] = useState<string | null>(null);
   const [amount, setAmount] = useState("");
+  // Starts in whatever unit the balance is being shown in — see entryUnit.
+  const [unit, setUnit] = useState<"YZXA" | "YOZ">("YZXA");
+  const [baseUnits, setBaseUnits] = useState<bigint | null>(null);
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<HumanError | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
   const load = useCallback(async () => {
@@ -44,16 +53,19 @@ function Stake() {
       setValidators((vs.validators ?? []) as unknown as ValidatorRow[]);
       setPositions(ds.delegations ?? []);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(humanize(err));
+      setValidators([]);
     }
   }, []);
 
   useEffect(() => {
+    setUnit(entryUnit());
     void load();
   }, [load]);
 
   async function submit(kind: "delegate" | "undelegate" | "withdraw", operator: string) {
     setBusy(true);
+    setPending(operator);
     setError(null);
     setNotice(null);
     try {
@@ -68,12 +80,18 @@ function Stake() {
       const price = feeMarket.tiers.find((t) => t.name === "normal");
       if (!price) throw new Error("The node did not offer a fee tier.");
 
+      // The amount input has already validated and converted; re-parsing the
+      // string here could disagree with the figure the user is looking at.
+      const units = baseUnits;
+      if (kind !== "withdraw" && (units === null || units <= 0n)) {
+        throw new Error("Enter an amount first.");
+      }
       const msg =
         kind === "withdraw"
           ? messages.withdrawRewards(from, operator)
           : kind === "delegate"
-            ? messages.delegate(from, operator, parseAmount(amount, "YZXA"))
-            : messages.undelegate(from, operator, parseAmount(amount, "YZXA"));
+            ? messages.delegate(from, operator, units!)
+            : messages.undelegate(from, operator, units!);
 
       const tx = withKey((key) =>
         signTransaction(
@@ -90,124 +108,226 @@ function Stake() {
       if (result.status === "failed") throw new Error(result.log || "The transaction failed.");
       setNotice(
         kind === "delegate"
-          ? "Staked. Your stake is now bonded and at risk of slashing."
+          ? "Staked. Your stake is bonded now, earning rewards and exposed to slashing."
           : kind === "undelegate"
-            ? "Unbonding started. The funds stay locked and slashable until the unbonding period ends."
-            : "Rewards claimed.",
+            ? "Unbonding started. The funds stay locked and still slashable until it completes."
+            : "Rewards claimed. They are in your spendable balance.",
       );
       setAmount("");
+      setBaseUnits(null);
       await load();
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(humanize(err));
     } finally {
       setBusy(false);
+      setPending(null);
     }
   }
 
+  const canAct = baseUnits !== null && baseUnits > 0n && !busy;
+
   return (
     <>
-      <h1>Earn by staking</h1>
-      <p className="subtitle">Bond YZXA to a validator and share in its rewards.</p>
+      <YzxNavigationBar title="Earn" back="/" />
 
-      <div className="alert warn">
-        <strong>Staking is not a savings account.</strong> Bonded YZXA cannot be spent, takes 21
-        days to unbond, and is slashed if your validator misbehaves — 5% and permanent removal for
-        double signing. Rewards depend on emission, fee revenue and how much is bonded network-wide.
-        No return is guaranteed to anyone.
-      </div>
+      <h1
+        style={{
+          margin: "0 0 var(--yzx-space-2)",
+          fontSize: "var(--yzx-text-2xl)",
+          letterSpacing: "var(--yzx-tracking-tight)",
+        }}
+      >
+        Earn by staking
+      </h1>
+      <p
+        style={{
+          margin: "0 0 var(--yzx-space-5)",
+          color: "var(--yzx-text-secondary)",
+          fontSize: "var(--yzx-text-base)",
+          lineHeight: "var(--yzx-leading-relaxed)",
+        }}
+      >
+        Bond YZXA to a validator and share what it earns.
+      </p>
 
-      {error ? <div className="alert danger">{error}</div> : null}
-      {notice ? <div className="alert ok">{notice}</div> : null}
+      <YzxAlert tone="warning" title="Staking is not a savings account.">
+        Bonded YZXA cannot be spent, takes 21 days to unbond, and is slashed if your validator
+        misbehaves — 5% and permanent removal for double signing. What you earn depends on
+        emission, fee revenue and how much of the network is bonded. No return is promised to
+        anyone, and none is guaranteed.
+      </YzxAlert>
+
+      {error ? (
+        <YzxAlert tone="danger" title={error.message}>
+          {error.action}
+        </YzxAlert>
+      ) : null}
+      {notice ? <YzxAlert tone="success" title={notice} /> : null}
 
       {positions.length > 0 ? (
         <>
-          <h2 style={{ fontSize: 15, marginTop: 24 }}>Your positions</h2>
-          <div className="list" style={{ marginBottom: 20 }}>
+          <YzxSectionHeader title="Your positions" />
+          <div style={{ display: "grid", gap: "var(--yzx-space-3)", marginBottom: "var(--yzx-space-6)" }}>
             {positions.map((p, i) => {
               const row = p as Record<string, string | number | boolean>;
+              const operator = String(row.validator);
+              const rewards = BigInt(String(row.pending_rewards || "0"));
               return (
-                <div className="list-item" key={i}>
-                  <div>
-                    <div className="title">{String(row.moniker || row.validator)}</div>
-                    <div className="meta">
-                      staked {String(row.staked_yzxa)} YZXA · rewards{" "}
-                      {formatYZXA(BigInt(String(row.pending_rewards || "0")))}
+                <YzxCard key={i}>
+                  <div style={{ display: "flex", alignItems: "center", gap: "var(--yzx-space-3)" }}>
+                    <YzxAvatar seed={operator} label={String(row.moniker || operator)} size={38} />
+                    <div style={{ minWidth: 0, flex: 1 }}>
+                      <p style={{ margin: 0, fontWeight: "var(--yzx-weight-semibold)", fontSize: "var(--yzx-text-base)" }}>
+                        {String(row.moniker || operator.slice(0, 16))}
+                      </p>
+                      <p style={{ margin: "2px 0 0", fontSize: "var(--yzx-text-xs)", color: "var(--yzx-text-secondary)" }}>
+                        {String(row.staked_yzxa)} YZXA staked
+                      </p>
                     </div>
-                    <div style={{ marginTop: 6, display: "flex", gap: 12 }}>
-                      <button
-                        className="ghost"
-                        disabled={busy}
-                        onClick={() => void submit("withdraw", String(row.validator))}
-                      >
-                        Claim rewards
-                      </button>
-                      <button
-                        className="ghost"
-                        disabled={busy || !amount}
-                        onClick={() => void submit("undelegate", String(row.validator))}
-                      >
-                        Unstake entered amount
-                      </button>
-                    </div>
+                    <ValidatorState jailed={Boolean(row.jailed)} tombstoned={Boolean(row.tombstoned)} />
                   </div>
-                  <div>
-                    {row.tombstoned ? (
-                      <span className="pill danger">Tombstoned</span>
-                    ) : row.jailed ? (
-                      <span className="pill warn">Jailed</span>
-                    ) : (
-                      <span className="pill ok">Active</span>
-                    )}
+
+                  <p
+                    style={{
+                      margin: "var(--yzx-space-3) 0 0",
+                      fontSize: "var(--yzx-text-sm)",
+                      color: "var(--yzx-text-secondary)",
+                    }}
+                  >
+                    Unclaimed rewards:{" "}
+                    <span className="yzx-mono" style={{ color: "var(--yzx-text)" }}>
+                      {formatYZXA(rewards)} YZXA
+                    </span>
+                  </p>
+
+                  <div style={{ display: "grid", gap: "var(--yzx-space-2)", marginTop: "var(--yzx-space-4)" }}>
+                    <YzxButton
+                      variant="secondary"
+                      size="md"
+                      busy={busy && pending === operator}
+                      disabled={busy || rewards === 0n}
+                      onClick={() => void submit("withdraw", operator)}
+                    >
+                      {rewards === 0n ? "No rewards to claim yet" : "Claim rewards"}
+                    </YzxButton>
+                    <YzxButton
+                      variant="ghost"
+                      size="md"
+                      disabled={!canAct}
+                      onClick={() => void submit("undelegate", operator)}
+                    >
+                      {canAct ? `Unstake ${amount} ${unit}` : "Enter an amount to unstake"}
+                    </YzxButton>
                   </div>
-                </div>
+                </YzxCard>
               );
             })}
           </div>
         </>
       ) : null}
 
-      <div className="field">
-        <label htmlFor="amount">Amount to stake or unstake (YZXA)</label>
-        <input
-          id="amount"
-          inputMode="decimal"
+      <YzxSectionHeader title="Amount" />
+      <div style={{ marginBottom: "var(--yzx-space-6)" }}>
+        <YzxAmountInput
           value={amount}
-          onChange={(e) => setAmount(e.target.value)}
-          placeholder="100"
+          unit={unit}
+          onValueChange={setAmount}
+          onUnitChange={setUnit}
+          onValidChange={setBaseUnits}
         />
       </div>
 
-      <h2 style={{ fontSize: 15 }}>Validators</h2>
-      <div className="list">
-        {validators.map((v) => (
-          <div className="list-item" key={v.operator}>
-            <div>
-              <div className="title">{v.moniker || v.operator.slice(0, 16)}</div>
-              <div className="meta">
-                {v.tokens_yzxa} YZXA · {(v.commission_bps / 100).toFixed(1)}% commission ·{" "}
-                {(Number(v.voting_power_bps) / 100).toFixed(2)}% power
-              </div>
-              {v.tombstoned ? (
-                <div className="meta" style={{ color: "var(--danger)" }}>
-                  removed permanently for double signing
-                </div>
-              ) : v.jailed ? (
-                <div className="meta" style={{ color: "var(--warn)" }}>jailed for downtime</div>
-              ) : null}
-            </div>
-            <button
-              className="ghost"
-              disabled={busy || v.jailed || v.tombstoned || !amount}
-              onClick={() => {
-                setSelected(v.operator);
-                void submit("delegate", v.operator);
-              }}
-            >
-              {busy && selected === v.operator ? "…" : "Stake"}
-            </button>
-          </div>
-        ))}
+      <YzxSectionHeader title="Validators" />
+      <div style={{ display: "grid", gap: "var(--yzx-space-3)" }}>
+        {validators === null
+          ? [0, 1, 2].map((i) => <YzxSkeleton key={i} height={84} radius="var(--yzx-radius-lg)" />)
+          : validators.map((v) => {
+              const unavailable = v.jailed || v.tombstoned;
+              return (
+                <YzxCard key={v.operator}>
+                  <div style={{ display: "flex", alignItems: "center", gap: "var(--yzx-space-3)" }}>
+                    <YzxAvatar seed={v.operator} label={v.moniker || v.operator} size={38} />
+                    <div style={{ minWidth: 0, flex: 1 }}>
+                      <p style={{ margin: 0, fontWeight: "var(--yzx-weight-semibold)", fontSize: "var(--yzx-text-base)" }}>
+                        {v.moniker || v.operator.slice(0, 16)}
+                      </p>
+                      <p style={{ margin: "2px 0 0", fontSize: "var(--yzx-text-xs)", color: "var(--yzx-text-secondary)" }}>
+                        {v.tokens_yzxa} YZXA · {(v.commission_bps / 100).toFixed(1)}% commission ·{" "}
+                        {(Number(v.voting_power_bps) / 100).toFixed(2)}% of voting power
+                      </p>
+                    </div>
+                    <ValidatorState jailed={v.jailed} tombstoned={v.tombstoned} />
+                  </div>
+
+                  {unavailable ? (
+                    <p
+                      style={{
+                        margin: "var(--yzx-space-3) 0 0",
+                        fontSize: "var(--yzx-text-xs)",
+                        color: "var(--yzx-text-secondary)",
+                        lineHeight: "var(--yzx-leading-relaxed)",
+                      }}
+                    >
+                      {v.tombstoned
+                        ? "Removed permanently for double signing. Stake here cannot be delegated."
+                        : "Jailed for missing blocks. It earns nothing while jailed."}
+                    </p>
+                  ) : (
+                    <div style={{ marginTop: "var(--yzx-space-4)" }}>
+                      <YzxButton
+                        variant="secondary"
+                        size="md"
+                        busy={busy && pending === v.operator}
+                        disabled={!canAct}
+                        onClick={() => void submit("delegate", v.operator)}
+                      >
+                        {canAct ? `Stake ${amount} ${unit}` : "Enter an amount above"}
+                      </YzxButton>
+                    </div>
+                  )}
+                </YzxCard>
+              );
+            })}
+        {validators !== null && validators.length === 0 ? (
+          <YzxCard tone="sunken">
+            <p style={{ margin: 0, color: "var(--yzx-text-secondary)", fontSize: "var(--yzx-text-sm)" }}>
+              This node reports no validators. That is a network or connection problem, not an
+              empty set — nothing is staked or at risk because of it.
+            </p>
+          </YzxCard>
+        ) : null}
       </div>
     </>
+  );
+}
+
+/**
+ * A validator's standing.
+ *
+ * Word first, then colour: the state has to survive a greyscale screen and a
+ * reader who cannot distinguish the tints.
+ */
+function ValidatorState({ jailed, tombstoned }: { jailed: boolean; tombstoned: boolean }) {
+  const [label, tone] = tombstoned
+    ? ["Removed", "var(--yzx-negative)"]
+    : jailed
+      ? ["Jailed", "var(--yzx-warning)"]
+      : ["Active", "var(--yzx-text-secondary)"];
+  return (
+    <span
+      style={{
+        flexShrink: 0,
+        fontSize: "var(--yzx-text-2xs)",
+        fontWeight: "var(--yzx-weight-semibold)",
+        letterSpacing: "var(--yzx-tracking-wide)",
+        textTransform: "uppercase",
+        color: tone,
+        border: `1px solid ${tone}`,
+        borderRadius: "var(--yzx-radius-full)",
+        padding: "3px var(--yzx-space-2)",
+      }}
+    >
+      {label}
+    </span>
   );
 }

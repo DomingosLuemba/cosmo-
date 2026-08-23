@@ -145,14 +145,27 @@ func (a *App) execTx(raw []byte, height, now int64, p state.Params) *abci.ExecTx
 		evs, err := a.dispatch(m, height, now, p)
 		if err != nil {
 			a.kv.RestorePending(feeSnapshot)
+			// The fee was charged and the sequence bumped, so this transaction
+			// is part of the signer's history even though nothing else
+			// changed. Index it, or the account's own wallet cannot show them
+			// what they were charged for.
+			failEvents := []abci.Event{}
+			if ev, ok := accountIndexEvent(nil, signer); ok {
+				failEvents = append(failEvents, ev)
+			}
 			return &abci.ExecTxResult{
 				Code:      CodeExecutionFailed,
 				Log:       fmt.Sprintf("message %d (%s): %v", i, m.Type(), err),
 				GasUsed:   int64(gasUsed),
 				GasWanted: int64(t.Auth.Fee.GasLimit),
+				Events:    failEvents,
 			}
 		}
 		events = append(events, evs...)
+	}
+
+	if ev, ok := accountIndexEvent(events, signer); ok {
+		events = append(events, ev)
 	}
 
 	return &abci.ExecTxResult{
@@ -492,3 +505,64 @@ func transferEvent(from, to types.Address, amount *big.Int) abci.Event {
 }
 
 func jsonUnmarshalEntry(b []byte, out any) error { return json.Unmarshal(b, out) }
+
+// --- transaction index by account ---------------------------------------
+//
+// CometBFT's key-value indexer only indexes attributes explicitly marked as
+// indexed, and a query has to name the event type it is searching. Emitting a
+// per-message `account` attribute would therefore force a wallet to run one
+// search per message type and merge the results, and to gain a new search
+// every time a message type is added.
+//
+// Instead every transaction carries one extra event, `account`, listing each
+// address it touched. A client asking "what has this account done?" runs a
+// single query — `account.address='yzx1…'` — that keeps working for message
+// types written after the client was.
+//
+// Without this, the only way to find an account's history is to walk blocks,
+// which on a one-second chain reaches about a minute into the past per hundred
+// requests. That is not a transaction history.
+
+// addressAttributeKeys are the attribute keys whose values name a party to a
+// transaction. Values are validated before being indexed, so a key that
+// carries something other than an address on some future event is skipped
+// rather than polluting the index.
+var addressAttributeKeys = map[string]bool{
+	"from": true, "to": true, "account": true, "owner": true,
+	"delegator": true, "validator": true, "operator": true,
+	"granter": true, "grantee": true, "signer": true,
+}
+
+// accountIndexEvent returns the `account` event for a transaction: the signer,
+// plus every address named by the events the messages produced. Returns false
+// when there is nothing to index.
+func accountIndexEvent(events []abci.Event, signer types.Address) (abci.Event, bool) {
+	seen := map[string]bool{}
+	attrs := make([]abci.EventAttribute, 0, 4)
+
+	add := func(s string) {
+		if s == "" || seen[s] {
+			return
+		}
+		if _, err := types.ParseAnyAddress(s); err != nil {
+			return
+		}
+		seen[s] = true
+		attrs = append(attrs, abci.EventAttribute{Key: "address", Value: s, Index: true})
+	}
+
+	// The signer pays the fee, so a transaction is part of their history even
+	// when every message failed to name them.
+	add(signer.String())
+	for _, e := range events {
+		for _, a := range e.Attributes {
+			if addressAttributeKeys[a.Key] {
+				add(a.Value)
+			}
+		}
+	}
+	if len(attrs) == 0 {
+		return abci.Event{}, false
+	}
+	return abci.Event{Type: "account", Attributes: attrs}, true
+}

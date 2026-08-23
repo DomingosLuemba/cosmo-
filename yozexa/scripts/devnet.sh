@@ -44,15 +44,35 @@ die()  { printf '\033[31m✗\033[0m %s\n' "$*" >&2; exit 1; }
 # PIDs are tracked in files rather than matched by command line, because
 # pattern-matching process lists is a good way to kill the wrong thing.
 
+# Each service runs in its own process group, and the group is what gets
+# recorded and signalled.
+#
+# Two things make this fiddlier than `cmd & echo $!`:
+#
+#   `npx next start` is three processes — npm, a shell, and the actual
+#   next-server. Signalling only the first leaves the last holding the port, so
+#   the next `up` cannot bind and reports a service as started that is not.
+#
+#   `setsid` forks, so the pid bash reports is a parent that exits immediately
+#   and never matches the new group. Instead the service writes its own pid
+#   from inside the new session and then `exec`s, which keeps that pid: the
+#   file ends up holding the group leader, so `kill -- -PID` reaches everything
+#   the service started.
 start_bg() {
   local name="$1"; shift
   if is_running "$name"; then
     warn "$name is already running (pid $(cat "$PID_DIR/$name.pid"))"
     return 0
   fi
-  "$@" > "$LOG_DIR/$name.log" 2>&1 &
-  echo $! > "$PID_DIR/$name.pid"
-  log "started $name (pid $!) — log: $LOG_DIR/$name.log"
+  local pidfile="$PID_DIR/$name.pid"
+  setsid bash -c 'echo $$ > "$1"; shift; exec "$@"' _ "$pidfile" "$@" \
+    > "$LOG_DIR/$name.log" 2>&1 &
+  # The pid is written by the child, so wait briefly for the file to appear.
+  for _ in $(seq 1 20); do
+    [[ -s "$pidfile" ]] && break
+    sleep 0.1
+  done
+  log "started $name (pid $(cat "$pidfile" 2>/dev/null || echo '?')) — log: $LOG_DIR/$name.log"
 }
 
 is_running() {
@@ -66,12 +86,14 @@ stop_bg() {
   [[ -f "$pidfile" ]] || return 0
   local pid; pid="$(cat "$pidfile")"
   if kill -0 "$pid" 2>/dev/null; then
-    kill -TERM "$pid" 2>/dev/null || true
+    # Negative pid signals the whole process group, so a wrapper's children go
+    # with it. Fall back to the single process if the group is already gone.
+    kill -TERM "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
     for _ in $(seq 1 25); do
       kill -0 "$pid" 2>/dev/null || break
       sleep 1
     done
-    kill -KILL "$pid" 2>/dev/null || true
+    kill -KILL "-$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
     log "stopped $name"
   fi
   rm -f "$pidfile"

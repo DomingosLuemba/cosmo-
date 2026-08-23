@@ -15,6 +15,7 @@ import (
 	"math/big"
 	"net"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -120,6 +121,8 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("/v1/proposal/", s.handlePathQuery("proposal"))
 	mux.HandleFunc("/v1/grants/", s.handlePathQuery("grants"))
 	mux.HandleFunc("/v1/alias/", s.handlePathQuery("alias"))
+
+	mux.HandleFunc("/v1/history/", s.handleHistory)
 
 	mux.HandleFunc("/v1/tx", s.handleBroadcast)
 	mux.HandleFunc("/v1/tx/", s.handleTxByHash)
@@ -718,4 +721,164 @@ func blockSummary(block *cmttypes.Block) map[string]any {
 		"transaction_count": len(block.Txs),
 		"app_hash":          strings.ToUpper(hex.EncodeToString(block.AppHash)),
 	}
+}
+
+// --- account history ----------------------------------------------------
+
+// HistoryEntry is one transaction in an account's history.
+//
+// It carries the raw events rather than an interpreted summary: what a
+// transfer "means" depends on which side the reader is on, and the node has no
+// business deciding that for them.
+type HistoryEntry struct {
+	Hash    string          `json:"hash"`
+	Height  int64           `json:"height"`
+	Time    string          `json:"time"`
+	Code    uint32          `json:"code"`
+	Log     string          `json:"log,omitempty"`
+	GasUsed int64           `json:"gas_used"`
+	Memo    string          `json:"memo,omitempty"`
+	Events  json.RawMessage `json:"events"`
+	Failed  bool            `json:"failed"`
+}
+
+// HistoryResponse is a page of an account's history, newest first.
+type HistoryResponse struct {
+	Address  string         `json:"address"`
+	Entries  []HistoryEntry `json:"entries"`
+	Total    int            `json:"total"`
+	Page     int            `json:"page"`
+	PerPage  int            `json:"per_page"`
+	Complete bool           `json:"complete"`
+	Note     string         `json:"note,omitempty"`
+}
+
+// handleHistory returns the transactions that touched an account, newest
+// first.
+//
+// This is served from CometBFT's transaction index, not by walking blocks: a
+// wallet needs an account's whole history, and scanning blocks reaches about a
+// minute into the past per hundred requests on a one-second chain.
+//
+// The index is a node-local convenience, not consensus state. A node started
+// with `indexer = "null"`, or one that replayed a chain whose transactions
+// predate the index, answers honestly rather than returning a short list as if
+// it were complete.
+func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
+	raw := strings.TrimPrefix(r.URL.Path, "/v1/history/")
+	if raw == "" {
+		writeError(w, http.StatusBadRequest, "expected /v1/history/{address}")
+		return
+	}
+	addr, err := types.ParseAnyAddress(raw)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "%v", err)
+		return
+	}
+	if s.env == nil {
+		writeError(w, http.StatusServiceUnavailable, "this node is not connected to consensus")
+		return
+	}
+
+	perPage := 25
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 100 {
+			perPage = n
+		}
+	}
+	page := 1
+	if v := r.URL.Query().Get("page"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			page = n
+		}
+	}
+
+	// Both forms of the address are searched: an operator's own transactions
+	// are indexed under whichever form the message named.
+	queries := []string{
+		fmt.Sprintf("account.address='%s'", addr.String()),
+		fmt.Sprintf("account.address='%s'", addr.ValoperString()),
+	}
+
+	ctx := &rpctypes.Context{}
+	seen := map[string]bool{}
+	entries := make([]HistoryEntry, 0, perPage)
+	total := 0
+	for _, q := range queries {
+		res, err := s.env.TxSearch(ctx, q, false, &page, &perPage, "desc")
+		if err != nil {
+			// An unindexed node is a configuration fact, not a server fault:
+			// say so plainly so a client can fall back to scanning blocks.
+			writeJSON(w, http.StatusOK, HistoryResponse{
+				Address: addr.String(), Entries: []HistoryEntry{}, Complete: false,
+				Note: "This node does not index transactions by account, so it cannot serve history. Ask the operator to set indexer = \"kv\", or read history from an explorer.",
+			})
+			return
+		}
+		total += res.TotalCount
+		for _, tx := range res.Txs {
+			hash := strings.ToUpper(hex.EncodeToString(tx.Hash))
+			if seen[hash] {
+				continue
+			}
+			seen[hash] = true
+			events, _ := json.Marshal(tx.TxResult.Events)
+			entries = append(entries, HistoryEntry{
+				Hash:    hash,
+				Height:  tx.Height,
+				Time:    s.blockTime(tx.Height),
+				Code:    tx.TxResult.Code,
+				Log:     tx.TxResult.Log,
+				GasUsed: tx.TxResult.GasUsed,
+				Memo:    memoOf(tx.Tx),
+				Events:  events,
+				Failed:  tx.TxResult.Code != app.CodeOK,
+			})
+		}
+	}
+
+	// Two searches are merged, so re-sort: newest first, and stable within a
+	// block by hash so the order does not wobble between calls.
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].Height != entries[j].Height {
+			return entries[i].Height > entries[j].Height
+		}
+		return entries[i].Hash < entries[j].Hash
+	})
+	if len(entries) > perPage {
+		entries = entries[:perPage]
+	}
+
+	writeJSON(w, http.StatusOK, HistoryResponse{
+		Address:  addr.String(),
+		Entries:  entries,
+		Total:    total,
+		Page:     page,
+		PerPage:  perPage,
+		Complete: true,
+	})
+}
+
+// blockTime returns a block's timestamp, or "" when the block store no longer
+// holds it (a pruned node). An empty string is better than a fabricated time.
+func (s *Server) blockTime(height int64) string {
+	cn := s.node.CometNode()
+	if cn == nil {
+		return ""
+	}
+	meta := cn.BlockStore().LoadBlockMeta(height)
+	if meta == nil {
+		return ""
+	}
+	return meta.Header.Time.UTC().Format(time.RFC3339)
+}
+
+// memoOf pulls the memo out of an encoded transaction. A transaction the node
+// cannot decode is still listed — it was in a block — just without its memo.
+func memoOf(raw cmttypes.Tx) string {
+	var t tx.Tx
+	if err := json.Unmarshal(raw, &t); err != nil {
+		return ""
+	}
+	return t.Body.Memo
 }

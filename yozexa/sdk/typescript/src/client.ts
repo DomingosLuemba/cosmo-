@@ -94,6 +94,42 @@ export interface TxStatusResult {
   gas_used?: number;
 }
 
+/** One event emitted by a transaction. */
+export interface ChainEvent {
+  type: string;
+  attributes: Array<{ key: string; value: string; index?: boolean }>;
+}
+
+/** One transaction in an account's history. */
+export interface HistoryEntry {
+  hash: string;
+  height: number;
+  /** RFC 3339, or "" on a pruned node that no longer holds the block. */
+  time: string;
+  code: number;
+  log?: string;
+  gas_used: number;
+  memo?: string;
+  events: ChainEvent[];
+  /** Included in a block but execution failed: the fee was still charged. */
+  failed: boolean;
+}
+
+export interface AccountHistory {
+  address: string;
+  entries: HistoryEntry[];
+  total: number;
+  page: number;
+  per_page: number;
+  /**
+   * False when the node cannot serve history — indexing disabled, or a chain
+   * replayed without it. An empty list with `complete: false` means "unknown",
+   * not "nothing happened".
+   */
+  complete: boolean;
+  note?: string;
+}
+
 export class YozexaError extends Error {
   constructor(
     message: string,
@@ -231,6 +267,24 @@ export class YozexaClient {
 
   block(height: number): Promise<Record<string, unknown>> {
     return this.#request(`/v1/block/${height}`);
+  }
+
+  /**
+   * Every transaction that touched an account, newest first.
+   *
+   * Served from the node's transaction index. A node running with indexing
+   * disabled answers with `complete: false` and a `note` saying so, rather
+   * than an empty list that would read as "this account has done nothing" —
+   * check `complete` before telling anyone their history is empty.
+   */
+  history(address: string, options: { limit?: number; page?: number } = {}): Promise<AccountHistory> {
+    const params = new URLSearchParams();
+    if (options.limit !== undefined) params.set("limit", String(options.limit));
+    if (options.page !== undefined) params.set("page", String(options.page));
+    const query = params.toString();
+    return this.#request<AccountHistory>(
+      `/v1/history/${encodeURIComponent(address)}${query ? `?${query}` : ""}`,
+    );
   }
 
   invariants(): Promise<{ ok: boolean; results: Array<{ name: string; ok: boolean; message?: string }> }> {
