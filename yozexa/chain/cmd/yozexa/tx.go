@@ -29,6 +29,7 @@ func txCmd() *cobra.Command {
 		txSendCmd(), txBurnCmd(), txStakeCmd(), txUnstakeCmd(),
 		txWithdrawCmd(), txVoteCmd(), txGrantCmd(), txRevokeCmd(),
 		txRegisterAliasCmd(),
+		txCreateValidatorCmd(), txEditValidatorCmd(), txUnjailCmd(),
 	)
 	return cmd
 }
@@ -483,6 +484,149 @@ func txRegisterAliasCmd() *cobra.Command {
 			return sc.submit(context.Background(), tx.MsgRegisterAlias{
 				Owner: sc.key.Address(), Alias: args[0],
 			})
+		},
+	}
+}
+
+// --- validator lifecycle -------------------------------------------------
+//
+// Without these three the validator set is whatever the genesis had, forever:
+// nobody can join, nobody can correct a commission, and a validator jailed for
+// downtime — which is meant to be recoverable — has no way back. The protocol
+// has always supported all three; nothing shipped could build the messages.
+
+func txCreateValidatorCmd() *cobra.Command {
+	c := &cobra.Command{
+		Use:   "create-validator [self-delegation]",
+		Short: "register the signing account as a validator and bond its stake",
+		Long: "Register a validator.\n\n" +
+			"The consensus public key is the base64 ed25519 key that `yozexad init`\n" +
+			"prints for the node. It is the key that signs blocks; the account\n" +
+			"signing this transaction is the operator that owns the stake.\n\n" +
+			"Commission is in basis points: 1000 is 10%. --max-commission-bps is a\n" +
+			"ceiling that can never be raised afterwards, so delegators can rely on\n" +
+			"it when they choose a validator.",
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			sc, err := prepare(cmd)
+			if err != nil {
+				return err
+			}
+			consKey, _ := cmd.Flags().GetString("consensus-pubkey")
+			moniker, _ := cmd.Flags().GetString("moniker")
+			identity, _ := cmd.Flags().GetString("identity")
+			website, _ := cmd.Flags().GetString("website")
+			details, _ := cmd.Flags().GetString("details")
+			commission, _ := cmd.Flags().GetUint32("commission-bps")
+			maxCommission, _ := cmd.Flags().GetUint32("max-commission-bps")
+			minSelf, _ := cmd.Flags().GetString("min-self-delegation")
+			unit, _ := cmd.Flags().GetString("unit")
+
+			if consKey == "" {
+				return fmt.Errorf("--consensus-pubkey is required; `yozexad init` prints it for the node")
+			}
+			if moniker == "" {
+				return fmt.Errorf("--moniker is required: a validator with no name cannot be chosen")
+			}
+			selfDelegation, err := types.ParseAmount(args[0], unit)
+			if err != nil {
+				return err
+			}
+			self, err := types.NewAmount(selfDelegation)
+			if err != nil {
+				return err
+			}
+			minAmount, err := types.ParseAmount(minSelf, unit)
+			if err != nil {
+				return fmt.Errorf("--min-self-delegation: %w", err)
+			}
+			minSelfAmt, err := types.NewAmount(minAmount)
+			if err != nil {
+				return err
+			}
+			return sc.submit(context.Background(), tx.MsgCreateValidator{
+				Operator:        sc.key.Address(),
+				ConsensusPubKey: consKey,
+				Description: tx.Description{
+					Moniker: moniker, Identity: identity, Website: website, Details: details,
+				},
+				CommissionRateBps: commission,
+				MaxCommissionBps:  maxCommission,
+				MinSelfDelegation: minSelfAmt,
+				SelfDelegation:    self,
+			})
+		},
+	}
+	c.Flags().String("consensus-pubkey", "", "base64 ed25519 consensus key, printed by `yozexad init`")
+	c.Flags().String("moniker", "", "the validator's name, shown to delegators")
+	c.Flags().String("identity", "", "optional identity string")
+	c.Flags().String("website", "", "optional website")
+	c.Flags().String("details", "", "optional description")
+	c.Flags().Uint32("commission-bps", 1_000, "commission in basis points (1000 = 10%)")
+	c.Flags().Uint32("max-commission-bps", 2_000, "maximum commission this validator may ever charge")
+	c.Flags().String("min-self-delegation", "1", "the self-delegation the operator commits to keeping")
+	c.Flags().String("unit", "YZXA", "amount unit")
+	return c
+}
+
+func txEditValidatorCmd() *cobra.Command {
+	c := &cobra.Command{
+		Use:   "edit-validator",
+		Short: "change a validator's description, or lower its commission",
+		Long: "Edit a validator.\n\n" +
+			"Commission can never exceed the maximum set when the validator was\n" +
+			"created. Leave --commission-bps unset to change only the description.",
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			sc, err := prepare(cmd)
+			if err != nil {
+				return err
+			}
+			moniker, _ := cmd.Flags().GetString("moniker")
+			if moniker == "" {
+				return fmt.Errorf("--moniker is required")
+			}
+			identity, _ := cmd.Flags().GetString("identity")
+			website, _ := cmd.Flags().GetString("website")
+			details, _ := cmd.Flags().GetString("details")
+
+			msg := tx.MsgEditValidator{
+				Operator: sc.key.Address(),
+				Description: tx.Description{
+					Moniker: moniker, Identity: identity, Website: website, Details: details,
+				},
+			}
+			if cmd.Flags().Changed("commission-bps") {
+				rate, _ := cmd.Flags().GetUint32("commission-bps")
+				msg.CommissionRateBps = &rate
+			}
+			return sc.submit(context.Background(), msg)
+		},
+	}
+	c.Flags().String("moniker", "", "the validator's name")
+	c.Flags().String("identity", "", "optional identity string")
+	c.Flags().String("website", "", "optional website")
+	c.Flags().String("details", "", "optional description")
+	c.Flags().Uint32("commission-bps", 0, "new commission in basis points; unset leaves it unchanged")
+	return c
+}
+
+func txUnjailCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "unjail",
+		Short: "release a validator jailed for downtime",
+		Long: "Release a validator that was jailed for missing blocks.\n\n" +
+			"Fix whatever took the node down first: unjailing a node that is still\n" +
+			"unhealthy simply jails it again, and each jailing costs stake.\n\n" +
+			"A validator tombstoned for double signing is refused here. That removal\n" +
+			"is permanent and no governance vote in this protocol can undo it.",
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			sc, err := prepare(cmd)
+			if err != nil {
+				return err
+			}
+			return sc.submit(context.Background(), tx.MsgUnjail{Operator: sc.key.Address()})
 		},
 	}
 }

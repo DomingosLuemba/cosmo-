@@ -147,6 +147,21 @@ replicating to all of them, the chain surviving a lost validator, halting
 rather than advancing without two thirds, recovering when quorum returns, and a
 node started from nothing replaying the chain from genesis.
 
+Those are crash faults. A validator that stays up and signs two conflicting
+things is the other half, and it is what the slashing design exists for:
+
+```bash
+make test-byzantine     # stages a real double-sign on a running network
+```
+
+The equivocation is produced the way real ones are — the same consensus key on
+two nodes, the second one's signing state reset, which is an operator restoring
+a backup. Twelve checks: evidence forms, the validator is slashed exactly 5% to
+the base unit, jailed, removed from the active set, cannot unjail itself, and
+its consensus key can never be reused by anyone — while a validator with its
+own key still joins, so the refusals are about that key and not about the path
+being broken.
+
 Dependencies are scanned with reachability analysis, so what is reported is
 what this code actually calls:
 
@@ -184,6 +199,7 @@ On a live single-validator localnet, not in a mock:
 | Faucet | proof-of-work required, 10 YZXA paid on chain, replay refused |
 | Wallet | driven in a browser: created, funded, spent, reconciled against the chain to the base unit |
 | Consensus | four validators agree block-for-block; the chain survives losing one, halts without two thirds, recovers, and a new node syncs from genesis |
+| Double signing | staged on a live network: evidence forms, 5% burned to the base unit, the validator tombstoned and its key banned forever |
 
 ### Audit
 

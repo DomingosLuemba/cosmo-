@@ -192,3 +192,112 @@ export function exec(grantee: string, granter: string, msgs: Msg[]): Msg {
   }
   return { type: MsgType.Exec, value: { grantee, granter, msgs } };
 }
+
+/** A validator's public description. Only the moniker is required. */
+export interface ValidatorDescription {
+  moniker: string;
+  identity?: string;
+  website?: string;
+  details?: string;
+}
+
+/**
+ * Create a validator.
+ *
+ * Without this the validator set can never change after genesis, which makes a
+ * network nobody can join. The consensus public key is CometBFT's base64
+ * ed25519 form — `yozexad init` prints it.
+ *
+ * Commission is in basis points: 1000 is 10%. `maxCommissionBps` is a ceiling
+ * the validator can never raise later, so delegators can rely on it.
+ */
+export function createValidator(
+  operator: string,
+  consensusPubKey: string,
+  description: ValidatorDescription,
+  options: {
+    selfDelegation: bigint;
+    commissionRateBps: number;
+    maxCommissionBps: number;
+    minSelfDelegation: bigint;
+  },
+): Msg {
+  if (!consensusPubKey.trim()) {
+    throw new Error("a consensus public key is required; `yozexad init` prints it");
+  }
+  if (!description.moniker.trim()) {
+    throw new Error("a validator needs a moniker");
+  }
+  if (options.selfDelegation <= 0n) {
+    throw new Error("a validator must bond a positive self-delegation");
+  }
+  if (options.minSelfDelegation <= 0n) {
+    throw new Error("min_self_delegation must be positive");
+  }
+  if (options.selfDelegation < options.minSelfDelegation) {
+    throw new Error("the self-delegation is below the minimum this validator commits to keeping");
+  }
+  if (options.commissionRateBps > options.maxCommissionBps) {
+    throw new Error("commission cannot start above its own maximum");
+  }
+  if (options.maxCommissionBps > 10_000) {
+    throw new Error("commission cannot exceed 100%");
+  }
+  return {
+    type: MsgType.CreateValidator,
+    value: {
+      operator,
+      consensus_pubkey: consensusPubKey,
+      description: descriptionValue(description),
+      commission_rate_bps: options.commissionRateBps,
+      max_commission_bps: options.maxCommissionBps,
+      min_self_delegation: options.minSelfDelegation.toString(),
+      self_delegation: options.selfDelegation.toString(),
+    },
+  };
+}
+
+/**
+ * Edit a validator's description, and optionally lower its commission.
+ *
+ * Commission can never exceed the maximum set at creation. Omit
+ * `commissionRateBps` to leave the rate untouched.
+ */
+export function editValidator(
+  operator: string,
+  description: ValidatorDescription,
+  commissionRateBps?: number,
+): Msg {
+  if (!description.moniker.trim()) {
+    throw new Error("a validator needs a moniker");
+  }
+  return {
+    type: MsgType.EditValidator,
+    value: {
+      operator,
+      description: descriptionValue(description),
+      ...(commissionRateBps === undefined ? {} : { commission_rate_bps: commissionRateBps }),
+    },
+  };
+}
+
+/**
+ * Release a validator jailed for downtime.
+ *
+ * Jailing for missed blocks is recoverable: fix whatever took the node down,
+ * wait out the jail period, and send this. Tombstoning is not — a validator
+ * removed for double signing is refused here, permanently, and no governance
+ * vote in this protocol can undo it.
+ */
+export function unjail(operator: string): Msg {
+  return { type: MsgType.Unjail, value: { operator } };
+}
+
+/** Drop empty optional fields so the signed bytes stay canonical. */
+function descriptionValue(d: ValidatorDescription): Record<string, string> {
+  const out: Record<string, string> = { moniker: d.moniker };
+  if (d.identity?.trim()) out.identity = d.identity;
+  if (d.website?.trim()) out.website = d.website;
+  if (d.details?.trim()) out.details = d.details;
+  return out;
+}

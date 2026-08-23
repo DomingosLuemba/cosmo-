@@ -10,7 +10,7 @@ SHELL := /usr/bin/env bash
 
 .PHONY: help build test check lint devnet devnet-down devnet-status devnet-reset \
         chain chain-test fuzz js js-test test-e2e test-consensus \
-        multinode multinode-down vulnscan clean
+        test-byzantine multinode multinode-down vulnscan clean
 
 help:
 	@echo "YOZEXA"
@@ -19,6 +19,7 @@ help:
 	@echo "  make test           run every test suite"
 	@echo "  make test-e2e       drive the wallet in a browser against a running devnet"
 	@echo "  make test-consensus build a 4-validator network and test consensus against it"
+	@echo "  make test-byzantine stage a real double-sign and check it is slashed and banned"
 	@echo "  make multinode      start a 4-validator network"
 	@echo "  make multinode-down stop it"
 	@echo "  make vulnscan       scan the Go dependencies for known vulnerabilities"
@@ -58,6 +59,12 @@ test-e2e:
 # recovering, and syncing a new node from genesis. Builds its own network.
 test-consensus:
 	./scripts/consensus-test.sh
+
+# A validator that stays up and signs two conflicting things for the same
+# height — the infraction the whole slashing design exists for. Builds its own
+# network and equivocates on it.
+test-byzantine:
+	./scripts/byzantine-test.sh
 
 multinode:
 	./scripts/multinode.sh up

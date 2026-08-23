@@ -2,6 +2,9 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  createValidator,
+  editValidator,
+  unjail,
   MAX_SUPPLY,
   ONE_YZXA,
   ONE_YOZ,
@@ -237,4 +240,61 @@ test("a destroyed key refuses to sign rather than signing with zeros", () => {
   const key = PrivateKey.generate();
   key.destroy();
   assert.throws(() => key.sign(new Uint8Array(32)), /destroyed/);
+});
+
+// Without these three the validator set is whatever the genesis had, forever:
+// nobody can join, nobody can correct a commission, and a validator jailed for
+// downtime — which is meant to be recoverable — has no way back.
+test("a validator can be created, edited and unjailed", () => {
+  const op = "yzx1qvlhdp68dwc4wj7x0mwq5huwcg4td7ca6e5nrd";
+  const consKey = "v4G/Sa1hWS+CEI8ZvlyPbVggAAAAAAAAAAAAAAAAAAA=";
+
+  const create = createValidator(op, consKey, { moniker: "v9" }, {
+    selfDelegation: 2_000n * ONE_YZXA,
+    commissionRateBps: 500,
+    maxCommissionBps: 1_500,
+    minSelfDelegation: ONE_YZXA,
+  });
+  assert.equal(create.type, "staking/create_validator");
+  assert.equal(create.value.consensus_pubkey, consKey);
+  assert.equal(create.value.self_delegation, (2_000n * ONE_YZXA).toString());
+  // Optional description fields are dropped rather than sent empty, so the
+  // signed bytes stay canonical.
+  assert.deepEqual(create.value.description, { moniker: "v9" });
+
+  const edit = editValidator(op, { moniker: "v9", website: "https://example.test" }, 400);
+  assert.equal(edit.type, "staking/edit_validator");
+  assert.equal(edit.value.commission_rate_bps, 400);
+  assert.deepEqual(edit.value.description, { moniker: "v9", website: "https://example.test" });
+
+  // Omitting the rate must leave it untouched, not set it to zero.
+  const descOnly = editValidator(op, { moniker: "v9" });
+  assert.equal("commission_rate_bps" in (descOnly.value as object), false);
+
+  assert.equal(unjail(op).type, "staking/unjail");
+});
+
+test("a validator that cannot be chosen or afforded is refused before signing", () => {
+  const op = "yzx1qvlhdp68dwc4wj7x0mwq5huwcg4td7ca6e5nrd";
+  const key = "v4G/Sa1hWS+CEI8ZvlyPbVggAAAAAAAAAAAAAAAAAAA=";
+  const sane = {
+    selfDelegation: 2_000n * ONE_YZXA,
+    commissionRateBps: 500,
+    maxCommissionBps: 1_500,
+    minSelfDelegation: ONE_YZXA,
+  };
+
+  assert.throws(() => createValidator(op, "", { moniker: "v" }, sane), /consensus public key/);
+  assert.throws(() => createValidator(op, key, { moniker: "  " }, sane), /moniker/);
+  assert.throws(() => createValidator(op, key, { moniker: "v" }, { ...sane, selfDelegation: 0n }),
+    /positive self-delegation/);
+  // A self-delegation under the minimum the validator commits to keeping would
+  // be jailable the moment it is created.
+  assert.throws(() => createValidator(op, key, { moniker: "v" },
+    { ...sane, selfDelegation: ONE_YZXA / 2n }), /below the minimum/);
+  // Commission above its own ceiling, and a ceiling above 100%.
+  assert.throws(() => createValidator(op, key, { moniker: "v" },
+    { ...sane, commissionRateBps: 2_000 }), /above its own maximum/);
+  assert.throws(() => createValidator(op, key, { moniker: "v" },
+    { ...sane, commissionRateBps: 500, maxCommissionBps: 10_001 }), /exceed 100%/);
 });
