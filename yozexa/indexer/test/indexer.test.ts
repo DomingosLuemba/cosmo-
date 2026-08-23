@@ -216,4 +216,73 @@ describe("indexer", { skip: !shouldRun }, () => {
     assert.equal(typeof rows[0]!.amount, "string");
     assert.equal(rows[0]!.amount, huge);
   });
+
+  // `onTransfer` is what settles payments. If the height is recorded before
+  // the consumer accepts a block, a consumer that fails means that block is
+  // never revisited: the money is on the chain, the order never completes, and
+  // nothing anywhere says why.
+  it("does not advance past a block whose consumer failed", async () => {
+    await freshDatabase();
+    const hash = randomUUID().replace(/-/g, "").toUpperCase();
+    const client = fakeNode({
+      height: 1,
+      blocks: { 1: { time: "2026-01-01T00:00:00Z", txs: [{ hash }] } },
+      transfers: { [hash]: [{ from: "yzx1a", to: "yzx1b", amount: "1000" }] },
+    });
+
+    let attempts = 0;
+    const indexer = new Indexer({
+      pool,
+      client,
+      onTransfer: async () => {
+        attempts += 1;
+        if (attempts === 1) throw new Error("settlement failed");
+      },
+    });
+    await indexer.initialise("yozexa-indexer-test");
+
+    await assert.rejects(() => indexer.indexOnce(), /settlement failed/);
+    assert.equal(
+      await indexer.lastIndexedHeight(),
+      0,
+      "the height advanced past a block the consumer never accepted",
+    );
+
+    // The next pass replays the block, and this time the consumer accepts it.
+    await indexer.indexOnce();
+    assert.equal(attempts, 2, "the failed block was not replayed");
+    assert.equal(await indexer.lastIndexedHeight(), 1);
+  });
+
+  // Replaying a block must not duplicate its rows, or a retry would double
+  // every transfer it had already written.
+  it("replays a block without duplicating what it already wrote", async () => {
+    await freshDatabase();
+    const hash = randomUUID().replace(/-/g, "").toUpperCase();
+    const client = fakeNode({
+      height: 1,
+      blocks: { 1: { time: "2026-01-01T00:00:00Z", txs: [{ hash }] } },
+      transfers: { [hash]: [{ from: "yzx1a", to: "yzx1b", amount: "1000" }] },
+    });
+
+    let failed = false;
+    const indexer = new Indexer({
+      pool,
+      client,
+      onTransfer: async () => {
+        if (!failed) {
+          failed = true;
+          throw new Error("settlement failed");
+        }
+      },
+    });
+    await indexer.initialise("yozexa-indexer-test");
+    await assert.rejects(() => indexer.indexOnce());
+    await indexer.indexOnce();
+
+    const { rows } = await pool.query<{ n: string }>(
+      "SELECT COUNT(*)::text AS n FROM indexed_transfers",
+    );
+    assert.equal(rows[0]!.n, "1", "the replay duplicated the transfer");
+  });
 });

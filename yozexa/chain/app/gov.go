@@ -2,12 +2,14 @@ package app
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/big"
 
 	abci "github.com/cometbft/cometbft/abci/types"
 
 	"github.com/yozexa/yozexa/chain/state"
+	"github.com/yozexa/yozexa/chain/store"
 	"github.com/yozexa/yozexa/chain/tx"
 	"github.com/yozexa/yozexa/chain/types"
 )
@@ -149,7 +151,15 @@ func (a *App) handleVote(s *state.State, m tx.MsgVote, now int64) error {
 
 // processGovernance advances every open proposal: expiring deposits, closing
 // votes, and executing passed proposals once their timelock has run.
-func (a *App) processGovernance(now int64, p state.Params) ([]abci.Event, error) {
+// processGovernance advances every active proposal.
+//
+// Parameters are re-read at the top of each iteration rather than taken once
+// for the whole loop. A parameter-change proposal executed here writes new
+// params to state, and anything processed after it in the same block must see
+// them: a proposal tallied against a quorum that a previous proposal just
+// raised, or a treasury spend measured against a cap a previous proposal just
+// lowered, is the loop disagreeing with the state it is writing.
+func (a *App) processGovernance(now int64, initial state.Params) ([]abci.Event, error) {
 	s := a.state
 	active, err := s.ActiveProposals()
 	if err != nil {
@@ -158,6 +168,10 @@ func (a *App) processGovernance(now int64, p state.Params) ([]abci.Event, error)
 	var events []abci.Event
 
 	for _, prop := range active {
+		p, err := s.Params()
+		if err != nil {
+			return nil, fmt.Errorf("reload params for proposal %d: %w", prop.ID, err)
+		}
 		switch prop.Status {
 
 		case state.ProposalStatusDeposit:
@@ -233,6 +247,7 @@ func (a *App) processGovernance(now int64, p state.Params) ([]abci.Event, error)
 			}
 		}
 	}
+	_ = initial // the loop reads params from state; this is only the block's starting point
 	return events, nil
 }
 
@@ -297,8 +312,20 @@ func (a *App) executeProposal(prop *state.Proposal, now int64, p state.Params) e
 		if prop.Upgrade == nil {
 			return fmt.Errorf("proposal has no upgrade payload")
 		}
-		return s.Store().Set([]byte("upgrade/scheduled"), []byte(fmt.Sprintf(
-			`{"name":%q,"height":%d,"info":%q}`, prop.Upgrade.Name, prop.Upgrade.Height, prop.Upgrade.Info)))
+		if prop.Upgrade.Height <= a.currentHeight {
+			return fmt.Errorf(
+				"upgrade %q is scheduled for height %d, which is not in the future (current height is %d)",
+				prop.Upgrade.Name, prop.Upgrade.Height, a.currentHeight)
+		}
+		raw, err := json.Marshal(ScheduledUpgrade{
+			Name:   prop.Upgrade.Name,
+			Height: prop.Upgrade.Height,
+			Info:   prop.Upgrade.Info,
+		})
+		if err != nil {
+			return err
+		}
+		return s.Store().Set(upgradeScheduledKey, raw)
 
 	default:
 		return fmt.Errorf("unknown proposal kind %q", prop.Kind)
@@ -357,4 +384,87 @@ func govEvent(kind string, id uint64, detail string) abci.Event {
 		attrs = append(attrs, abci.EventAttribute{Key: "detail", Value: detail})
 	}
 	return abci.Event{Type: kind, Attributes: attrs}
+}
+
+// --- scheduled upgrades --------------------------------------------------
+
+// upgradeScheduledKey holds the upgrade a passed proposal scheduled, if any.
+var upgradeScheduledKey = []byte("upgrade/scheduled")
+
+// ScheduledUpgrade is a coordinated halt the network has voted for.
+type ScheduledUpgrade struct {
+	Name   string `json:"name"`
+	Height int64  `json:"height"`
+	Info   string `json:"info,omitempty"`
+}
+
+// ScheduledUpgrade returns the pending upgrade, if the network has voted for
+// one. Exposed so a node operator can see what is coming without reading the
+// store by hand.
+func (a *App) ScheduledUpgrade() (*ScheduledUpgrade, error) {
+	raw, err := a.state.Store().Get(upgradeScheduledKey)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil, nil // nothing scheduled, which is the normal case
+	}
+	if err != nil {
+		return nil, err
+	}
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	var u ScheduledUpgrade
+	if err := json.Unmarshal(raw, &u); err != nil {
+		return nil, fmt.Errorf("stored upgrade is unreadable: %w", err)
+	}
+	return &u, nil
+}
+
+// checkScheduledUpgrade halts the node when it reaches an upgrade height it is
+// not built for.
+//
+// A software upgrade changes what the state machine computes. If some nodes
+// apply it at height H and others do not, they produce different app hashes
+// from the same block and the network splits — which is far worse than
+// stopping. So every node stops at H, and the operators replace the binary.
+//
+// A node built for the upgrade says so through UpgradeName, and passes
+// through. Without this the vote was theatre: the proposal passed, the height
+// arrived, and every node carried on running the old rules.
+func (a *App) checkScheduledUpgrade(height int64) error {
+	u, err := a.ScheduledUpgrade()
+	if err != nil || u == nil {
+		return err
+	}
+	if height < u.Height {
+		return nil
+	}
+	if a.UpgradeName == u.Name {
+		// This binary implements the upgrade. Clear the schedule so the halt
+		// does not fire again, and carry on.
+		a.logger.Info("applying scheduled upgrade",
+			"name", u.Name, "height", u.Height, "info", u.Info)
+		return a.state.Store().Delete(upgradeScheduledKey)
+	}
+	return &UpgradeRequiredError{Upgrade: *u, Height: height, Running: a.UpgradeName}
+}
+
+// UpgradeRequiredError halts a node that has reached an upgrade height it does
+// not implement. It is deliberately not recoverable: continuing would mean
+// disagreeing with the nodes that did upgrade.
+type UpgradeRequiredError struct {
+	Upgrade ScheduledUpgrade
+	Height  int64
+	Running string
+}
+
+func (e *UpgradeRequiredError) Error() string {
+	running := e.Running
+	if running == "" {
+		running = "(none)"
+	}
+	return fmt.Sprintf(
+		"UPGRADE REQUIRED: the network voted for upgrade %q at height %d and this node is at %d "+
+			"running upgrade %q. Stopping rather than diverging from the nodes that upgraded. "+
+			"Install the release that implements %q and restart. %s",
+		e.Upgrade.Name, e.Upgrade.Height, e.Height, running, e.Upgrade.Name, e.Upgrade.Info)
 }

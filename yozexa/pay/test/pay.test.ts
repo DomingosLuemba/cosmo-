@@ -10,13 +10,22 @@
  */
 import { after, before, describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { createHmac } from "node:crypto";
 import { randomUUID } from "node:crypto";
 
 import { migrate, openPool, type Pool } from "@yozexa/indexer";
 import { PrivateKey, ONE_YZXA } from "@yozexa/sdk";
 
 import { generateApiKey, sha256Hex, authenticate, AuthError, RateLimiter } from "../src/auth.js";
-import { fingerprint, IdempotencyConflict, lookup, store } from "../src/idempotency.js";
+import {
+  claim,
+  complete,
+  fingerprint,
+  IdempotencyConflict,
+  IdempotencyInFlight,
+  release,
+  sweep as sweepIdempotency,
+} from "../src/idempotency.js";
 import { PaymentsService, PaymentError } from "../src/payments.js";
 import { NoPriceSource, HttpPriceSource, quoteFiat, QuoteUnavailable } from "../src/quotes.js";
 import { collect as collectMetrics, render as renderMetrics } from "../src/metrics.js";
@@ -398,20 +407,86 @@ describe("idempotency", { skip: !shouldRun }, () => {
   it("replays the stored response for the same key and body", async () => {
     const key = randomUUID();
     const hash = fingerprint("POST", "/v1/payments", '{"amount":"1"}');
-    assert.equal(await lookup(pool, merchantId, key, hash), null);
 
-    await store(pool, merchantId, key, hash, { status: 201, body: { id: "pay_x" } });
-    const replay = await lookup(pool, merchantId, key, hash);
-    assert.deepEqual(replay, { status: 201, body: { id: "pay_x" } });
+    const first = await claim(pool, merchantId, key, hash);
+    assert.equal(first.claimed, true, "the first caller should own a fresh key");
+    await complete(pool, merchantId, key, { status: 201, body: { id: "pay_x" } });
+
+    const second = await claim(pool, merchantId, key, hash);
+    assert.equal(second.claimed, false);
+    assert.deepEqual(second.replay, { status: 201, body: { id: "pay_x" } });
   });
 
   it("refuses the same key with a different body", async () => {
     const key = randomUUID();
     const first = fingerprint("POST", "/v1/payments", '{"amount":"1"}');
-    await store(pool, merchantId, key, first, { status: 201, body: { id: "pay_y" } });
+    await claim(pool, merchantId, key, first);
+    await complete(pool, merchantId, key, { status: 201, body: { id: "pay_y" } });
 
     const different = fingerprint("POST", "/v1/payments", '{"amount":"999"}');
-    await assert.rejects(() => lookup(pool, merchantId, key, different), IdempotencyConflict);
+    await assert.rejects(() => claim(pool, merchantId, key, different), IdempotencyConflict);
+  });
+
+  // The race the whole module exists to prevent. Looking the key up and
+  // running the request afterwards leaves a gap in which both callers find
+  // nothing — and by the time the duplicate response is discarded, the
+  // customer has already been charged twice.
+  it("lets exactly one of many simultaneous callers through", async () => {
+    const key = randomUUID();
+    const hash = fingerprint("POST", "/v1/payments", '{"amount":"5"}');
+
+    const outcomes = await Promise.allSettled(
+      Array.from({ length: 8 }, () => claim(pool, merchantId, key, hash)),
+    );
+    const owners = outcomes.filter((o) => o.status === "fulfilled" && o.value.claimed === true);
+    const inFlight = outcomes.filter(
+      (o) => o.status === "rejected" && o.reason instanceof IdempotencyInFlight,
+    );
+    assert.equal(owners.length, 1, `${owners.length} callers were allowed to run the same request`);
+    assert.equal(inFlight.length, 7, "the losers should be told the request is already running");
+  });
+
+  // A transient failure must not hold the key forever: the client was told to
+  // retry with the same one.
+  it("gives the key back when the request fails", async () => {
+    const key = randomUUID();
+    const hash = fingerprint("POST", "/v1/payments", '{"amount":"7"}');
+
+    assert.equal((await claim(pool, merchantId, key, hash)).claimed, true);
+    await release(pool, merchantId, key);
+    assert.equal((await claim(pool, merchantId, key, hash)).claimed, true, "the key was not released");
+  });
+
+  // A completed key must NOT be released by a later failure elsewhere, or a
+  // replay would re-run a request that already succeeded.
+  it("does not release a key whose request completed", async () => {
+    const key = randomUUID();
+    const hash = fingerprint("POST", "/v1/payments", '{"amount":"9"}');
+    await claim(pool, merchantId, key, hash);
+    await complete(pool, merchantId, key, { status: 201, body: { id: "pay_z" } });
+
+    await release(pool, merchantId, key);
+    const again = await claim(pool, merchantId, key, hash);
+    assert.equal(again.claimed, false, "a completed key was released and would run twice");
+  });
+
+  // A process killed mid-request leaves a claim nobody will finish. Without
+  // the sweep the client gets "still in progress" forever for a request that
+  // is not running.
+  it("releases a claim whose request died", async () => {
+    const key = randomUUID();
+    const hash = fingerprint("POST", "/v1/payments", '{"amount":"11"}');
+    await claim(pool, merchantId, key, hash);
+    await pool.query(
+      `UPDATE idempotency_keys SET claimed_at = now() - interval '30 minutes'
+        WHERE merchant_id = $1 AND key = $2`,
+      [merchantId, key],
+    );
+
+    await assert.rejects(() => claim(pool, merchantId, key, hash), IdempotencyInFlight);
+    await sweepIdempotency(pool, 24, 5);
+    assert.equal((await claim(pool, merchantId, key, hash)).claimed, true,
+      "an abandoned claim was never released");
   });
 });
 
@@ -624,5 +699,208 @@ describe("metrics", { skip: !shouldRun }, () => {
     // Sorted keys, and a quote escaped exactly once — double-escaping would
     // reach the scraper as a\\"b.
     assert.ok(out.includes('m{alpha="a",note="a\\"b",zebra="z"} 1'), out);
+  });
+});
+
+// Request signing is the feature that verifies a caller holds the API secret,
+// not merely the API key. It computed its HMAC over the *hash* of the secret,
+// which the client does not have, so no signature could ever verify: every
+// caller that opted in was locked out with a 401.
+describe("request signing", { skip: !shouldRun }, () => {
+  const WINDOW = 300;
+
+  /** What a correctly-behaving client sends. */
+  function sign(secret: string, nonce: string, body: string, timestamp: number): string {
+    return createHmac("sha256", secret)
+      .update(`${timestamp}.${nonce}.${body}`, "utf8")
+      .digest("hex");
+  }
+
+  /** What the server must do to verify it. */
+  async function verify(
+    keyId: string,
+    nonce: string,
+    body: string,
+    timestamp: number,
+    signature: string,
+  ): Promise<boolean> {
+    if (Math.abs(Math.floor(Date.now() / 1000) - timestamp) > WINDOW) return false;
+    const { rows } = await pool.query<{ secret_encrypted: string | null }>(
+      "SELECT secret_encrypted FROM api_keys WHERE id = $1",
+      [keyId],
+    );
+    const stored = rows[0]?.secret_encrypted;
+    if (!stored) return false;
+    const secret = decryptSecret(stored, keyId);
+    const expected = createHmac("sha256", secret)
+      .update(`${timestamp}.${nonce}.${body}`, "utf8")
+      .digest("hex");
+    if (expected !== signature) return false;
+    const claimed = await pool.query(
+      `INSERT INTO used_nonces (api_key_id, nonce) VALUES ($1, $2)
+       ON CONFLICT (api_key_id, nonce) DO NOTHING RETURNING nonce`,
+      [keyId, nonce],
+    );
+    return (claimed.rowCount ?? 0) > 0;
+  }
+
+  async function newKey(): Promise<{ id: string; secret: string }> {
+    const generated = generateApiKey("test");
+    const id = newApiKeyId();
+    await pool.query(
+      `INSERT INTO api_keys
+         (id, merchant_id, name, environment, key_hash, key_prefix, secret_hash, secret_encrypted)
+       VALUES ($1, $2, 'signing key', 'test', $3, $4, $5, $6)`,
+      [id, merchantId, generated.keyHash, generated.keyPrefix, generated.secretHash,
+       encryptSecret(generated.secret, id)],
+    );
+    return { id, secret: generated.secret };
+  }
+
+  it("accepts a signature made with the secret the client was given", async () => {
+    const { id, secret } = await newKey();
+    const body = '{"amount":"1"}';
+    const ts = Math.floor(Date.now() / 1000);
+    const nonce = randomUUID();
+    assert.equal(await verify(id, nonce, body, ts, sign(secret, nonce, body, ts)), true);
+  });
+
+  it("refuses a signature made with the stored hash instead of the secret", async () => {
+    const { id, secret } = await newKey();
+    const body = '{"amount":"1"}';
+    const ts = Math.floor(Date.now() / 1000);
+    const nonce = randomUUID();
+    // Signing with the stored hash would make a database read enough to forge
+    // a request, which is what hashing the secret exists to prevent.
+    const forged = sign(sha256Hex(secret), nonce, body, ts);
+    assert.equal(await verify(id, nonce, body, ts, forged), false);
+  });
+
+  it("refuses a replay of a signature it already accepted", async () => {
+    const { id, secret } = await newKey();
+    const body = '{"amount":"2"}';
+    const ts = Math.floor(Date.now() / 1000);
+    const nonce = randomUUID();
+    const sig = sign(secret, nonce, body, ts);
+
+    assert.equal(await verify(id, nonce, body, ts, sig), true);
+    // Same bytes, still inside the timestamp window, and it must not work
+    // twice: without the nonce record this is a second payment.
+    assert.equal(await verify(id, nonce, body, ts, sig), false);
+  });
+
+  it("lets exactly one of two simultaneous replays through", async () => {
+    const { id, secret } = await newKey();
+    const body = '{"amount":"3"}';
+    const ts = Math.floor(Date.now() / 1000);
+    const nonce = randomUUID();
+    const sig = sign(secret, nonce, body, ts);
+
+    const results = await Promise.all([
+      verify(id, nonce, body, ts, sig),
+      verify(id, nonce, body, ts, sig),
+    ]);
+    assert.equal(results.filter(Boolean).length, 1, "both replays were accepted");
+  });
+
+  it("refuses a signature over a different body", async () => {
+    const { id, secret } = await newKey();
+    const ts = Math.floor(Date.now() / 1000);
+    const nonce = randomUUID();
+    const sig = sign(secret, nonce, '{"amount":"1"}', ts);
+    assert.equal(await verify(id, nonce, '{"amount":"999"}', ts, sig), false);
+  });
+
+  it("refuses a signature older than the window", async () => {
+    const { id, secret } = await newKey();
+    const body = '{"amount":"1"}';
+    const stale = Math.floor(Date.now() / 1000) - (WINDOW + 60);
+    const nonce = randomUUID();
+    assert.equal(await verify(id, nonce, body, stale, sign(secret, nonce, body, stale)), false);
+  });
+});
+
+// Settlement matches an incoming transfer to an outstanding payment by exact
+// amount, so two outstanding payments sharing one amount make the match
+// ambiguous — and the wrong order gets marked paid.
+describe("unique amounts under concurrency", { skip: !shouldRun }, () => {
+  it("gives simultaneous payments for the same amount different amounts", async () => {
+    const amount = 42n * ONE_YZXA;
+    const created = await Promise.all(
+      Array.from({ length: 8 }, (_, i) =>
+        payments.create({
+          merchantId,
+          amount,
+          description: "race",
+          reference: `race-${randomUUID()}-${i}`,
+        }),
+      ),
+    );
+
+    const amounts = created.map((p) => p.expected_amount);
+    assert.equal(
+      new Set(amounts).size,
+      amounts.length,
+      `two outstanding payments share an amount: ${amounts.join(", ")}`,
+    );
+    // The adjustment stays economically negligible — well under 10^-14 YZXA.
+    for (const a of amounts) {
+      const delta = BigInt(a) - amount;
+      assert.ok(delta >= 0n && delta < 4_096n, `amount moved by ${delta} base units`);
+    }
+  });
+
+  // The database holds the invariant, so a code path that skipped the check
+  // entirely still could not create the ambiguity.
+  it("refuses a duplicate outstanding amount even when inserted directly", async () => {
+    const amount = 77n * ONE_YZXA;
+    const first = await payments.create({
+      merchantId,
+      amount,
+      description: "direct",
+      reference: `direct-${randomUUID()}`,
+    });
+
+    await assert.rejects(
+      () =>
+        pool.query(
+          `INSERT INTO payments
+             (id, merchant_id, status, expected_amount, expected_address, expires_at)
+           VALUES ($1, $2, 'created', $3, $4, now() + interval '1 hour')`,
+          [
+            `pay_${randomUUID().replace(/-/g, "")}`,
+            merchantId,
+            first.expected_amount,
+            first.expected_address,
+          ],
+        ),
+      /duplicate key|unique/i,
+      "the database allowed two outstanding payments with the same amount",
+    );
+  });
+
+  // The constraint covers outstanding payments only. Once one is settled or
+  // expired its amount is free again, or a busy address would run out.
+  it("frees an amount once its payment is no longer outstanding", async () => {
+    const amount = 91n * ONE_YZXA;
+    const first = await payments.create({
+      merchantId,
+      amount,
+      description: "reuse",
+      reference: `reuse-${randomUUID()}`,
+    });
+    await pool.query("UPDATE payments SET status = 'expired' WHERE id = $1", [first.id]);
+
+    const second = await payments.create({
+      merchantId,
+      amount,
+      description: "reuse",
+      reference: `reuse-${randomUUID()}`,
+    });
+    assert.equal(
+      second.expected_amount,
+      first.expected_amount,
+      "the amount was not reused after the first payment stopped being outstanding",
+    );
   });
 });

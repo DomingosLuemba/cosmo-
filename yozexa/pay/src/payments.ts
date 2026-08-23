@@ -110,42 +110,53 @@ export class PaymentsService {
       throw new PaymentError("provide either `amount` in base units, or `fiat_amount` and `currency`");
     }
 
-    // Make the amount unique among this merchant's outstanding payments, so
-    // an exact-amount match can never be ambiguous. The adjustment is at most
-    // a few thousand base units — under 10^-14 YZXA, economically nothing —
-    // and it is what lets a merchant use one settlement address for everything
-    // without risking crediting the wrong order.
-    amount = await this.#uniqueAmount(merchant.settlement_address, amount);
-
     const id = newPaymentId();
     const expiresAt = new Date(Date.now() + (input.expiresInSeconds ?? 3_600) * 1000);
 
-    const { rows } = await this.pool.query<Payment>(
-      `INSERT INTO payments
-         (id, merchant_id, status, fiat_amount_cents, fiat_currency, expected_amount,
-          expected_address, quote_rate, quote_source, quote_expires_at, description,
-          reference, metadata, payment_link_id, invoice_id, expires_at)
-       VALUES ($1, $2, 'created', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
-       RETURNING *`,
-      [
-        id,
-        input.merchantId,
-        input.fiatAmountCents?.toString() ?? null,
-        input.fiatCurrency ?? null,
-        amount.toString(),
-        merchant.settlement_address,
-        rate,
-        source,
-        quoteExpiresAt,
-        input.description ?? null,
-        input.reference ?? null,
-        JSON.stringify(input.metadata ?? {}),
-        input.paymentLinkId ?? null,
-        input.invoiceId ?? null,
-        expiresAt,
-      ],
+    // Settlement matches an incoming transfer to an outstanding payment by
+    // exact amount, so every outstanding payment on a settlement address must
+    // have a different one. The adjustment is at most a few thousand base
+    // units — under 10^-14 YZXA, economically nothing — and it is what lets a
+    // merchant use one address for everything without risking crediting the
+    // wrong order.
+    //
+    // Choosing the amount by reading the table and then inserting is a race:
+    // two concurrent creates read the same rows, pick the same amount, and
+    // both insert. Reading with a lock does not help, because row locks cannot
+    // lock rows that do not exist yet. So the database holds the invariant —
+    // a partial unique index over outstanding payments — and the insert is
+    // retried against the next free amount when it collides. The constraint
+    // holds even for a code path that forgets to be careful.
+    const payment = await this.#insertWithUniqueAmount(
+      merchant.settlement_address,
+      amount,
+      (unique) =>
+        this.pool.query<Payment>(
+          `INSERT INTO payments
+             (id, merchant_id, status, fiat_amount_cents, fiat_currency, expected_amount,
+              expected_address, quote_rate, quote_source, quote_expires_at, description,
+              reference, metadata, payment_link_id, invoice_id, expires_at)
+           VALUES ($1, $2, 'created', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+           RETURNING *`,
+          [
+            id,
+            input.merchantId,
+            input.fiatAmountCents?.toString() ?? null,
+            input.fiatCurrency ?? null,
+            unique.toString(),
+            merchant.settlement_address,
+            rate,
+            source,
+            quoteExpiresAt,
+            input.description ?? null,
+            input.reference ?? null,
+            JSON.stringify(input.metadata ?? {}),
+            input.paymentLinkId ?? null,
+            input.invoiceId ?? null,
+            expiresAt,
+          ],
+        ),
     );
-    const payment = rows[0]!;
     await enqueue(this.pool, input.merchantId, "payment.created", publicPayment(payment), `${id}:created`);
     return payment;
   }
@@ -571,7 +582,20 @@ export class PaymentsService {
    * price. If no unique value is found within the window the payment is
    * refused rather than created ambiguously.
    */
-  async #uniqueAmount(address: string, desired: bigint): Promise<bigint> {
+  /**
+   * Insert a payment at the first amount free on its settlement address.
+   *
+   * The uniqueness is enforced by a partial unique index over outstanding
+   * payments, not by the read below: the read only picks a likely-free
+   * starting point so the common case does not collide. When the insert loses
+   * a race it moves to the next candidate and tries again, which is what makes
+   * this correct under concurrency rather than merely usually right.
+   */
+  async #insertWithUniqueAmount(
+    address: string,
+    desired: bigint,
+    insert: (amount: bigint) => Promise<{ rows: Payment[] }>,
+  ): Promise<Payment> {
     const MAX_ADJUSTMENT = 4_096n;
     const { rows } = await this.pool.query<{ expected_amount: string }>(
       `SELECT expected_amount FROM payments
@@ -582,15 +606,26 @@ export class PaymentsService {
       [address, desired.toString(), MAX_ADJUSTMENT.toString()],
     );
     const taken = new Set(rows.map((r) => r.expected_amount));
+
     for (let delta = 0n; delta < MAX_ADJUSTMENT; delta++) {
       const candidate = desired + delta;
-      if (!taken.has(candidate.toString())) return candidate;
+      if (taken.has(candidate.toString())) continue;
+      try {
+        const result = await insert(candidate);
+        return result.rows[0]!;
+      } catch (err) {
+        // 23505 is a unique violation: another request took this amount
+        // between the read and the insert. Any other error is not ours.
+        if ((err as { code?: string }).code !== "23505") throw err;
+        taken.add(candidate.toString());
+      }
     }
     throw new PaymentError(
       "too many outstanding payments for the same amount; retry shortly or settle the existing ones",
       409,
     );
   }
+
 
   async #merchant(id: string): Promise<{ id: string; settlement_address: string; status: string }> {
     const { rows } = await this.pool.query<{ id: string; settlement_address: string; status: string }>(

@@ -152,6 +152,29 @@ func (h *harness) commitBlock(txs ...[]byte) []*abci.ExecTxResult {
 	return res.TxResults
 }
 
+// tryBlock runs one empty block and returns the error instead of failing the
+// test. Used where the block is *expected* to fail — a node halting at an
+// upgrade height it does not implement, for instance.
+func (h *harness) tryBlock() error {
+	h.t.Helper()
+	h.height++
+	h.now = h.now.Add(3 * time.Second)
+	if _, err := h.app.FinalizeBlock(context.Background(), &abci.RequestFinalizeBlock{
+		Height: h.height,
+		Time:   h.now,
+		DecidedLastCommit: abci.CommitInfo{
+			Votes: []abci.VoteInfo{{
+				Validator:   abci.Validator{Address: h.valConsAddr.Bytes(), Power: 500},
+				BlockIdFlag: 2,
+			}},
+		},
+	}); err != nil {
+		return err
+	}
+	_, err := h.app.Commit(context.Background(), &abci.RequestCommit{})
+	return err
+}
+
 // advance moves the chain forward by n blocks with no transactions.
 func (h *harness) advance(n int) {
 	h.t.Helper()

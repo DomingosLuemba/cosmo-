@@ -112,6 +112,16 @@ func (a *App) applyGenesis(g Genesis) error {
 // beginBlock runs before any transaction: liveness accounting, evidence
 // handling, emission and reward distribution.
 func (a *App) beginBlock(req *abci.RequestFinalizeBlock, now int64, p state.Params) error {
+	a.currentHeight = req.Height
+
+	// 0. Stop before anything else if the network voted for an upgrade this
+	//    node does not implement. Executing the block would mean computing a
+	//    different app hash from the nodes that did upgrade, and a split chain
+	//    is worse than a stopped one.
+	if err := a.checkScheduledUpgrade(req.Height); err != nil {
+		return err
+	}
+
 	// 1. Punish equivocation first. A validator that double signed must not be
 	//    paid for the block in which its evidence landed.
 	for _, ev := range req.Misbehavior {

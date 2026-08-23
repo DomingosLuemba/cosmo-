@@ -71,6 +71,16 @@ type App struct {
 	// every block. It is on by default: on a network that settles money, a
 	// silent accounting error is far worse than a halt.
 	invariantsEveryBlock bool
+
+	// currentHeight is the height of the block being executed, so proposal
+	// execution can refuse to schedule an upgrade in the past.
+	currentHeight int64
+
+	// UpgradeName is the coordinated upgrade this binary implements, empty on
+	// a build that implements none. When the chain reaches a scheduled upgrade
+	// height, a node whose UpgradeName does not match halts rather than
+	// carrying on with rules the upgraded nodes no longer follow.
+	UpgradeName string
 }
 
 // Options configure an App.

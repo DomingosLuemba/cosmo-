@@ -15,7 +15,15 @@ import { YozexaClient } from "@yozexa/sdk";
 import { authenticate, AuthError, RateLimiter, requireScope, sha256Hex, type ApiKeyRecord } from "./auth.js";
 import { loadConfig, type Config } from "./config.js";
 import { collect as collectMetrics, render as renderMetrics } from "./metrics.js";
-import { fingerprint, IdempotencyConflict, lookup, store } from "./idempotency.js";
+import {
+  claim,
+  complete,
+  fingerprint,
+  IdempotencyConflict,
+  IdempotencyInFlight,
+  release,
+  sweep as sweepIdempotency,
+} from "./idempotency.js";
 import { PaymentError, PaymentsService, publicPayment } from "./payments.js";
 import { HttpPriceSource, NoPriceSource, QuoteUnavailable, type PriceSource } from "./quotes.js";
 import { deliverDue, enqueue, WEBHOOK_EVENTS, type WebhookEvent } from "./webhooks.js";
@@ -146,25 +154,46 @@ export class PayServer {
     const ctx: RequestContext = { req, res, url, body, json, apiKey, clientIp };
 
     // Idempotency wraps every mutating request.
+    //
+    // The key is claimed BEFORE the request runs. Looking it up first and
+    // recording the response afterwards leaves a gap in which two concurrent
+    // requests both find nothing and both execute — and by the time the second
+    // response is discarded, the customer has been charged twice.
     const idempotencyKey = header(req, "idempotency-key");
     if (req.method !== "GET" && idempotencyKey) {
       const hash = fingerprint(req.method ?? "", url.pathname, body);
+      let owned: boolean;
       try {
-        const previous = await lookup(this.pool, apiKey.merchantId, idempotencyKey, hash);
-        if (previous) {
+        const outcome = await claim(this.pool, apiKey.merchantId, idempotencyKey, hash);
+        if (!outcome.claimed) {
           res.setHeader("Idempotent-Replay", "true");
-          return send(res, previous.status, previous.body);
+          return send(res, outcome.replay.status, outcome.replay.body);
         }
+        owned = true;
       } catch (err) {
         if (err instanceof IdempotencyConflict) return send(res, 409, { error: err.message });
+        if (err instanceof IdempotencyInFlight) return send(res, 409, { error: err.message });
         throw err;
       }
+
       const captured = captureResponse(res);
-      await this.#route(ctx);
+      try {
+        await this.#route(ctx);
+      } catch (err) {
+        // The request failed outright. Give the key back, or the client can
+        // never retry with the one they were told to reuse.
+        await release(this.pool, apiKey.merchantId, idempotencyKey).catch(() => undefined);
+        throw err;
+      }
       const result = captured();
       if (result && result.status < 500) {
-        await store(this.pool, apiKey.merchantId, idempotencyKey, hash, result);
+        await complete(this.pool, apiKey.merchantId, idempotencyKey, result);
+      } else {
+        // A 5xx is the server's fault and is meant to be retried, so the key
+        // must not be held against a response nobody wants to replay.
+        await release(this.pool, apiKey.merchantId, idempotencyKey).catch(() => undefined);
       }
+      if (owned) return;
       return;
     }
 
@@ -452,29 +481,74 @@ export class PayServer {
     };
   }
 
+  /**
+   * Verify a signed request.
+   *
+   * The client signs with the secret it was given. The server must therefore
+   * verify with that same secret, which means it has to be able to recover it
+   * — so it is stored encrypted under the service key, exactly as webhook
+   * secrets are. `secret_hash` stays for identification and is never a key.
+   *
+   * This previously computed the HMAC over `secret_hash`, which the client
+   * does not have, so no signature could ever verify: every caller that opted
+   * into signing was locked out with a 401. Making the *client* sign with the
+   * hash would have removed the mismatch by turning a value stored in the
+   * database into a bearer credential — anyone who could read the table could
+   * then forge requests, which is the thing hashing a secret exists to
+   * prevent.
+   *
+   * The nonce is recorded, so a captured signed request cannot be replayed
+   * inside the five-minute window the timestamp allows. Idempotency does not
+   * cover this: a replay carrying no Idempotency-Key is simply a second
+   * request.
+   */
   async #verifyRequestSignature(apiKeyId: string, req: IncomingMessage, body: string): Promise<boolean> {
     const signature = header(req, "x-yozexa-signature");
     const timestamp = header(req, "x-yozexa-timestamp");
     const nonce = header(req, "x-yozexa-nonce");
     if (!signature || !timestamp || !nonce) return false;
+    if (nonce.length < 8 || nonce.length > 128) return false;
 
     const age = Math.abs(Math.floor(Date.now() / 1000) - Number(timestamp));
-    if (!Number.isFinite(age) || age > 300) return false;
+    if (!Number.isFinite(age) || age > SIGNATURE_WINDOW_SECONDS) return false;
 
-    const { rows } = await this.pool.query<{ secret_hash: string }>(
-      "SELECT secret_hash FROM api_keys WHERE id = $1",
+    const { rows } = await this.pool.query<{ secret_encrypted: string | null }>(
+      "SELECT secret_encrypted FROM api_keys WHERE id = $1",
       [apiKeyId],
     );
-    if (rows.length === 0) return false;
+    const stored = rows[0]?.secret_encrypted;
+    if (!stored) return false; // a key issued before encrypted storage cannot sign
 
-    // The stored value is a hash of the secret, so the signature is computed
-    // over that hash: the server never holds the plaintext secret either.
-    const expected = createHmac("sha256", rows[0]!.secret_hash)
+    let secret: string;
+    try {
+      secret = decryptSecret(stored, apiKeyId);
+    } catch {
+      return false;
+    }
+
+    const expected = createHmac("sha256", secret)
       .update(`${timestamp}.${nonce}.${body}`, "utf8")
       .digest("hex");
     const a = Buffer.from(expected, "utf8");
     const b = Buffer.from(signature, "utf8");
-    return a.length === b.length && timingSafeEqual(a, b);
+    if (a.length !== b.length || !timingSafeEqual(a, b)) return false;
+
+    // Burn the nonce. Recorded only after the signature verifies, so an
+    // attacker cannot exhaust the table with unsigned guesses; the unique
+    // constraint is what makes two concurrent replays resolve to one.
+    try {
+      const claimed = await this.pool.query(
+        `INSERT INTO used_nonces (api_key_id, nonce) VALUES ($1, $2)
+         ON CONFLICT (api_key_id, nonce) DO NOTHING
+         RETURNING nonce`,
+        [apiKeyId, nonce],
+      );
+      return (claimed.rowCount ?? 0) > 0;
+    } catch {
+      // A nonce that cannot be recorded cannot be guaranteed unused, and a
+      // signed request accepted twice is worse than one refused once.
+      return false;
+    }
   }
 }
 
@@ -485,6 +559,23 @@ export class PayServer {
  * is missing, which makes `deliverDue` mark the delivery failed with a clear
  * reason rather than sending an unverifiable payload.
  */
+/** How long a signed request stays valid. Also how long a nonce must be kept. */
+const SIGNATURE_WINDOW_SECONDS = 300;
+
+/**
+ * Delete nonces older than the signature window.
+ *
+ * A request older than the window is refused on its timestamp alone, so its
+ * nonce can never be accepted again and the row is dead weight.
+ */
+export async function sweepNonces(pool: Pool): Promise<number> {
+  const { rowCount } = await pool.query(
+    `DELETE FROM used_nonces WHERE used_at < now() - ($1 || ' seconds')::interval`,
+    [SIGNATURE_WINDOW_SECONDS * 2],
+  );
+  return rowCount ?? 0;
+}
+
 export async function webhookSecret(pool: Pool, endpointId: string): Promise<string | null> {
   const { rows } = await pool.query<{ secret_encrypted: string | null }>(
     "SELECT secret_encrypted FROM webhook_endpoints WHERE id = $1",
@@ -672,6 +763,11 @@ export async function main(): Promise<void> {
   // Deliver webhooks and expire stale payments on a timer.
   const worker = setInterval(() => {
     void payments.expireStale().catch((err) => console.error("[pay] expiry sweep:", err));
+    // Nonces older than twice the signature window can never be accepted
+    // again, and abandoned idempotency claims would otherwise block a retry
+    // forever.
+    void sweepNonces(pool).catch((err) => console.error("[pay] nonce sweep:", err));
+    void sweepIdempotency(pool).catch((err) => console.error("[pay] idempotency sweep:", err));
     void deliverDue(pool, { secretFor: (id) => webhookSecret(pool, id) }).catch((err) =>
       console.error("[pay] webhook delivery:", err),
     );

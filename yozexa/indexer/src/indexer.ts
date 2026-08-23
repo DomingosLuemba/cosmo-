@@ -107,11 +107,23 @@ export class Indexer {
     for (; height <= last; height++) {
       const block = (await this.options.client.block(height)) as unknown as BlockSummary;
       const transfers = await this.#indexBlock(block);
-      processed++;
-      this.options.onBlock?.(height, transfers.length);
+
+      // Hand every transfer to the consumer BEFORE recording the height.
+      //
+      // `onTransfer` is what settles payments. If it throws — a deadlock, a
+      // constraint, the process dying — and the height has already advanced,
+      // that block is never revisited: the money is on the chain and the order
+      // never completes, with nothing anywhere saying why. Leaving the height
+      // behind means the next pass replays the block. Consumers must therefore
+      // be idempotent, which settleTransfer is: it matches against payments
+      // that are still outstanding, and a settled one no longer is.
       for (const transfer of transfers) {
         await this.options.onTransfer?.(transfer);
       }
+      await this.#recordHeight(block.height);
+
+      processed++;
+      this.options.onBlock?.(height, transfers.length);
     }
     return processed;
   }
@@ -162,15 +174,26 @@ export class Indexer {
           [t.txHash, t.blockHeight, t.blockTime, t.transferIndex, t.from, t.to, t.amount, t.memo],
         );
       }
-      await client.query(
-        `INSERT INTO indexer_state (id, chain_id, last_indexed_height, updated_at)
-         VALUES (1, (SELECT chain_id FROM indexer_state WHERE id = 1), $1, now())
-         ON CONFLICT (id) DO UPDATE SET last_indexed_height = $1, updated_at = now()`,
-        [block.height],
-      );
     });
 
     return transfers;
+  }
+
+  /**
+   * Record how far indexing has got.
+   *
+   * Separate from #indexBlock, and called only after every consumer has
+   * accepted the block's transfers, so a consumer that fails leaves the height
+   * behind and the block is replayed rather than skipped. The rows themselves
+   * are written with ON CONFLICT DO NOTHING, so a replay is harmless.
+   */
+  async #recordHeight(height: number): Promise<void> {
+    await this.options.pool.query(
+      `INSERT INTO indexer_state (id, chain_id, last_indexed_height, updated_at)
+       VALUES (1, (SELECT chain_id FROM indexer_state WHERE id = 1), $1, now())
+       ON CONFLICT (id) DO UPDATE SET last_indexed_height = $1, updated_at = now()`,
+      [height],
+    );
   }
 
   /** Read the transfer events a transaction emitted. */
