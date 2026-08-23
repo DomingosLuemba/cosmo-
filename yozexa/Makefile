@@ -9,7 +9,8 @@ SHELL := /usr/bin/env bash
 .DEFAULT_GOAL := help
 
 .PHONY: help build test check lint devnet devnet-down devnet-status devnet-reset \
-        chain chain-test fuzz js js-test test-e2e clean
+        chain chain-test fuzz js js-test test-e2e test-consensus \
+        multinode multinode-down clean
 
 help:
 	@echo "YOZEXA"
@@ -17,6 +18,9 @@ help:
 	@echo "  make build          build the chain binaries and every JavaScript package"
 	@echo "  make test           run every test suite"
 	@echo "  make test-e2e       drive the wallet in a browser against a running devnet"
+	@echo "  make test-consensus build a 4-validator network and test consensus against it"
+	@echo "  make multinode      start a 4-validator network"
+	@echo "  make multinode-down stop it"
 	@echo "  make check          formatting, vet, typecheck and tests — what CI runs"
 	@echo "  make fuzz           a short fuzzing pass over the parsers and state machine"
 	@echo "  make devnet         start the whole stack against a local chain"
@@ -47,6 +51,18 @@ js-test:
 # a running devnet. Skips itself when the devnet or a Chromium is missing.
 test-e2e:
 	npm run test:e2e --workspace @yozexa/wallet-web
+
+# Consensus properties only exist with a real validator set: agreement, block
+# replication, surviving a lost validator, halting without two thirds,
+# recovering, and syncing a new node from genesis. Builds its own network.
+test-consensus:
+	./scripts/consensus-test.sh
+
+multinode:
+	./scripts/multinode.sh up
+
+multinode-down:
+	./scripts/multinode.sh down
 
 fuzz:
 	$(MAKE) -C chain fuzz

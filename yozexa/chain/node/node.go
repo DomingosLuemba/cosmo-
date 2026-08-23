@@ -19,6 +19,7 @@ import (
 	"github.com/cometbft/cometbft/p2p"
 	"github.com/cometbft/cometbft/privval"
 	"github.com/cometbft/cometbft/proxy"
+	"github.com/spf13/viper"
 
 	dbm "github.com/cometbft/cometbft-db"
 
@@ -52,15 +53,32 @@ func (n *Node) CometNode() *cmtnode.Node { return n.cmt }
 
 // New builds a node from a home directory that `yozexad init` has prepared.
 func New(c Config) (*Node, error) {
-	config := cfg.DefaultConfig()
-	config.SetRoot(c.HomeDir)
-
-	viperConfigPath := filepath.Join(c.HomeDir, "config", "config.toml")
-	if _, err := os.Stat(viperConfigPath); err != nil {
-		return nil, fmt.Errorf("no CometBFT config at %s: run `yozexad init` first", viperConfigPath)
+	configPath := filepath.Join(c.HomeDir, "config", "config.toml")
+	if _, err := os.Stat(configPath); err != nil {
+		return nil, fmt.Errorf("no CometBFT config at %s: run `yozexad init` first", configPath)
 	}
+
+	// Read the operator's config.toml, rather than only checking that it
+	// exists. Everything a node operator can set lives in that file — which
+	// addresses to listen on, which peers to dial, consensus timeouts,
+	// mempool limits, pruning. Starting from defaults and ignoring the file
+	// makes all of it inert: two nodes on one machine both try to bind the
+	// same port, and `persistent_peers` never dials anyone, so a network of
+	// more than one validator cannot be assembled at all.
+	config := cfg.DefaultConfig()
+	v := viper.New()
+	v.SetConfigFile(configPath)
+	if err := v.ReadInConfig(); err != nil {
+		return nil, fmt.Errorf("read %s: %w", configPath, err)
+	}
+	if err := v.Unmarshal(config); err != nil {
+		return nil, fmt.Errorf("parse %s: %w", configPath, err)
+	}
+	// SetRoot after unmarshalling: the file holds paths relative to the home
+	// directory, and this is what turns them absolute.
+	config.SetRoot(c.HomeDir)
 	if err := config.ValidateBasic(); err != nil {
-		return nil, fmt.Errorf("invalid node config: %w", err)
+		return nil, fmt.Errorf("invalid node config in %s: %w", configPath, err)
 	}
 
 	logger := cmtlog.NewTMLogger(cmtlog.NewSyncWriter(os.Stdout))

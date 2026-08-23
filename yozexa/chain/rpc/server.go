@@ -642,11 +642,30 @@ func (s *Server) handleStatus(w http.ResponseWriter, _ *http.Request) {
 	var supply map[string]any
 	_ = json.Unmarshal(supplyRaw, &supply)
 
+	// The active validator set size, so a status response says whether this is
+	// one node or a network.
+	activeValidators := 0
+	if raw, err := s.query("validators"); err == nil {
+		var vs struct {
+			Validators []struct {
+				Active bool `json:"active"`
+			} `json:"validators"`
+		}
+		if json.Unmarshal(raw, &vs) == nil {
+			for _, v := range vs.Validators {
+				if v.Active {
+					activeValidators++
+				}
+			}
+		}
+	}
+
 	status := map[string]any{
 		"chain_id":     chainID,
 		"node_version": app.Version,
 		"app_version":  app.AppVersion,
 		"supply":       supply,
+		"validators":   activeValidators,
 	}
 	if cn := s.node.CometNode(); cn != nil {
 		bs := cn.BlockStore()
@@ -657,6 +676,11 @@ func (s *Server) handleStatus(w http.ResponseWriter, _ *http.Request) {
 		}
 		status["catching_up"] = cn.ConsensusReactor().WaitSync()
 		status["node_id"] = string(cn.NodeInfo().ID())
+		// How many peers this node is connected to. Operating a network means
+		// knowing whether a node is isolated, and an isolated node answers
+		// every other field here exactly as a healthy one would — it just
+		// stops advancing, which looks identical to a quiet chain.
+		status["peers"] = cn.Switch().Peers().Size()
 	}
 	// Networks that are not mainnet say so, loudly, in every status response.
 	if !strings.EqualFold(chainID, "yozexa-1") {
