@@ -129,6 +129,10 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("/v1/simulate", s.handleSimulate)
 	mux.HandleFunc("/v1/blocks", s.handleBlocks)
 	mux.HandleFunc("/v1/block/", s.handleBlock)
+	// Prometheus scrape target. Deliberately unversioned and outside /v1:
+	// it is an operational surface, not part of the chain's API contract.
+	mux.HandleFunc("/metrics", s.handleMetrics)
+
 	mux.HandleFunc("/v1/health", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"status": "ok"})
 	})
